@@ -21,7 +21,11 @@ from theme import THEME_QSS, HOPE_GOLD, ACCENT, ASH, BONE
 from version import __version__
 from update_checker import check_for_update
 
-ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys._MEIPASS)
+else:
+    BASE_DIR = Path(__file__).resolve().parent
+ASSETS_DIR = BASE_DIR / "assets"
 ICON_ICO = ASSETS_DIR / "icon.ico"
 ICON_PNG = ASSETS_DIR / "icon.png"
 

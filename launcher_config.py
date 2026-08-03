@@ -1,8 +1,15 @@
+import os
 import json
 from pathlib import Path
 from typing import Any, Dict
 
-CONFIG_PATH = Path(__file__).resolve().parent / "launcher_config.json"
+APPDATA = os.getenv("APPDATA")
+if APPDATA:
+    BASE_DIR = Path(APPDATA) / "ShinriTrialLauncher"
+else:
+    BASE_DIR = Path.home() / ".shinri_trial_launcher"
+BASE_DIR.mkdir(parents=True, exist_ok=True)
+CONFIG_PATH = BASE_DIR / "launcher_config.json"
 
 
 def load_config() -> Dict[str, Any]:
