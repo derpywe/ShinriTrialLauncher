@@ -18,6 +18,8 @@ from servers import LOBBIES
 from server_query import query_server, ServerStatus
 from launcher_config import load_config, save_config, add_recent_server
 from theme import THEME_QSS, HOPE_GOLD, ACCENT, ASH, BONE
+from version import __version__
+from update_checker import check_for_update
 
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 ICON_ICO = ASSETS_DIR / "icon.ico"
@@ -303,6 +305,80 @@ class ServerTab(QWidget):
             btn.setText("Сервер полон" if is_full else "Подключиться")
 
 
+class UpdateDialog(QDialog):
+
+    def __init__(self, update_info: dict, parent=None):
+        super().__init__(parent)
+        self.update_info = update_info
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setObjectName("SettingsDialog")
+        self.setFixedSize(460, 260)
+        if parent is not None:
+            geo = parent.geometry()
+            self.move(
+                geo.x() + (geo.width() - self.width()) // 2,
+                geo.y() + (geo.height() - self.height()) // 2,
+            )
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        header = QFrame()
+        header.setObjectName("SettingsHeader")
+        header.setFixedHeight(44)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(20, 0, 0, 0)
+        title = QLabel("ДОСТУПНО ОБНОВЛЕНИЕ")
+        title.setObjectName("TitleBarText")
+        header_layout.addWidget(title)
+        header_layout.addStretch()
+        close_btn = QPushButton("✕")
+        close_btn.setObjectName("TitleBarCloseButton")
+        close_btn.setFixedSize(44, 44)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(self.close)
+        header_layout.addWidget(close_btn)
+        outer.addWidget(header)
+
+        body = QWidget()
+        body.setObjectName("SettingsBody")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(28, 24, 28, 24)
+        body_layout.setSpacing(10)
+
+        version_label = QLabel(f"Новая версия: {update_info['version']}")
+        version_label.setObjectName("SettingsSectionLabel")
+        body_layout.addWidget(version_label)
+
+        notes = update_info.get("notes", "").strip()
+        if notes:
+            notes_label = QLabel(notes[:300])
+            notes_label.setObjectName("HintLabel")
+            notes_label.setWordWrap(True)
+            body_layout.addWidget(notes_label)
+
+        body_layout.addStretch()
+
+        buttons_row = QHBoxLayout()
+        later_btn = QPushButton("Позже")
+        later_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        later_btn.clicked.connect(self.close)
+        download_btn = QPushButton("Скачать")
+        download_btn.setObjectName("MenuButtonPrimary")
+        download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        download_btn.clicked.connect(self._on_download_clicked)
+        buttons_row.addWidget(later_btn)
+        buttons_row.addWidget(download_btn)
+        body_layout.addLayout(buttons_row)
+
+        outer.addWidget(body, 1)
+
+    def _on_download_clicked(self):
+        webbrowser.open(self.update_info["url"])
+        self.close()
+
+
 class SettingsDialog(QDialog):
 
     def __init__(self, parent=None):
@@ -546,6 +622,27 @@ class LauncherWindow(QMainWindow):
         self.timer.start(REFRESH_INTERVAL_MS)
 
         self._init_tray_icon()
+        self._check_update_executor = ThreadPoolExecutor(max_workers=1)
+        self.update_check_done.connect(self._on_update_check_done)
+        QTimer.singleShot(0, self._check_for_update)
+
+    update_check_done = pyqtSignal(object)
+
+    def _check_for_update(self):
+        self._check_update_executor.submit(self._check_update_worker)
+
+    def _check_update_worker(self):
+        try:
+            info = check_for_update(__version__)
+        except Exception:
+            info = None
+        self.update_check_done.emit(info)
+
+    def _on_update_check_done(self, info):
+        if info is None:
+            return
+        dialog = UpdateDialog(info, self)
+        dialog.show()
 
     def _init_tray_icon(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
