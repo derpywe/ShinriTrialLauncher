@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QTableWidget, QTableWidgetItem, QPushButton, QLabel,
     QHeaderView, QAbstractItemView, QFrame, QScrollArea, QComboBox, QDialog,
-    QCheckBox, QSystemTrayIcon, QMenu
+    QCheckBox, QSystemTrayIcon, QMenu, QLineEdit
 )
 
 from servers import LOBBIES
@@ -69,41 +69,34 @@ class HomeTab(QWidget):
 
         layout.addWidget(title)
         layout.addWidget(subtitle)
-        layout.addSpacing(20)
-        layout.addLayout(self._build_useful_links())
-        layout.addStretch()
+        layout.addSpacing(16)
+
+        lobby_frame = QFrame()
+        lobby_frame.setObjectName("LobbyPanel")
+        lobby_frame_layout = QVBoxLayout(lobby_frame)
+        lobby_frame_layout.setContentsMargins(0, 0, 0, 0)
+        self.lobbies_tab = ServerTab(
+            LOBBIES,
+            empty_hint=(
+                "Список лобби пуст. Впиши реальные сервера в servers.py "
+                "(список LOBBIES) — формат: (ip, port, название)."
+            ),
+        )
+        lobby_frame_layout.addWidget(self.lobbies_tab)
+        layout.addWidget(lobby_frame, 1)
+
         layout.addLayout(self._build_bottom_bar())
-
-    def _build_useful_links(self) -> QVBoxLayout:
-        block = QVBoxLayout()
-        block.setSpacing(8)
-
-        section_label = QLabel("ПОЛЕЗНЫЕ ССЫЛКИ")
-        section_label.setObjectName("SettingsSectionLabel")
-        block.addWidget(section_label)
-
-        links_row = QHBoxLayout()
-        links_row.setSpacing(8)
-
-        useful_links = [
-            ("Kirigiri's Press", "https://www.kirigiris.press/guidebook"),
-            ("Отзывы игроков", "https://shinrireviews.com/"),
-            ("Аддоны в Workshop", "https://steamcommunity.com/sharedfiles/filedetails/?id=3691631101"),
-        ]
-        for label, url in useful_links:
-            btn = QPushButton(label)
-            btn.setObjectName("RefreshButton")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda _, u=url: webbrowser.open(u))
-            links_row.addWidget(btn)
-
-        links_row.addStretch()
-        block.addLayout(links_row)
-        return block
 
     def _build_bottom_bar(self) -> QHBoxLayout:
         bar = QHBoxLayout()
         bar.addLayout(self._build_social_links())
+        bar.addStretch()
+
+        credit_label = QLabel("by derpy")
+        credit_label.setObjectName("CreditLabel")
+        credit_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        bar.addWidget(credit_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
         bar.addStretch()
 
         self.play_btn = QPushButton("ИГРАТЬ")
@@ -115,10 +108,7 @@ class HomeTab(QWidget):
 
         return bar
 
-    def _build_social_links(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setSpacing(10)
-
+    def _build_social_links(self) -> QVBoxLayout:
         col = QVBoxLayout()
         col.setSpacing(4)
 
@@ -140,13 +130,7 @@ class HomeTab(QWidget):
 
         col.addWidget(site_link)
         col.addWidget(discord_link)
-
-        credit_label = QLabel("by derpy")
-        credit_label.setObjectName("CreditLabel")
-
-        row.addLayout(col)
-        row.addWidget(credit_label, 0, Qt.AlignmentFlag.AlignVCenter)
-        return row
+        return col
 
     def _on_play_clicked(self):
         if not LOBBIES:
@@ -202,16 +186,37 @@ class ServerTab(QWidget):
         self.executor = ThreadPoolExecutor(max_workers=8)
         self.result_ready.connect(self._apply_row)
         self.buttons: dict[int, QPushButton] = {}
+        self._closed = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 14)
         layout.setSpacing(10)
 
         top_bar = QHBoxLayout()
+
+        saved_filters = load_config().get("server_filters", {})
+
+        self.hide_offline_checkbox = QCheckBox("Скрыть неактивные сервера")
+        self.hide_offline_checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.hide_offline_checkbox.blockSignals(True)
+        self.hide_offline_checkbox.setChecked(bool(saved_filters.get("hide_offline", False)))
+        self.hide_offline_checkbox.blockSignals(False)
+        self.hide_offline_checkbox.stateChanged.connect(self._on_filter_toggled)
+
+        self.hide_full_checkbox = QCheckBox("Скрыть полные сервера")
+        self.hide_full_checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.hide_full_checkbox.blockSignals(True)
+        self.hide_full_checkbox.setChecked(bool(saved_filters.get("hide_full", False)))
+        self.hide_full_checkbox.blockSignals(False)
+        self.hide_full_checkbox.stateChanged.connect(self._on_filter_toggled)
+
         refresh_btn = QPushButton("⟳  Обновить")
         refresh_btn.setObjectName("RefreshButton")
         refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         refresh_btn.clicked.connect(self.refresh)
+
+        top_bar.addWidget(self.hide_offline_checkbox)
+        top_bar.addWidget(self.hide_full_checkbox)
         top_bar.addStretch()
         top_bar.addWidget(refresh_btn)
         layout.addLayout(top_bar)
@@ -262,12 +267,25 @@ class ServerTab(QWidget):
             self.table.setCellWidget(row, 5, btn)
             self.buttons[row] = btn
 
+        self._apply_filters()
+
     def refresh(self):
+        if self._closed:
+            return
         for row, (ip, port, name) in enumerate(self.server_defs):
             future = self.executor.submit(query_server, ip, port, name)
             future.add_done_callback(
-                lambda f, row=row, ip=ip, port=port: self._on_result(row, ip, port, f.result())
+                lambda f, row=row, ip=ip, port=port: self._on_future_done(f, row, ip, port)
             )
+
+    def _on_future_done(self, future, row: int, ip: str, port: int):
+        if future.cancelled():
+            return
+        try:
+            status = future.result()
+        except Exception:
+            return
+        self._on_result(row, ip, port, status)
 
     def _handle_connect_click(self, ip: str, port: int):
         status = self.statuses.get((ip, port))
@@ -277,10 +295,19 @@ class ServerTab(QWidget):
         self.refresh()
 
     def _on_result(self, row: int, ip: str, port: int, status: ServerStatus):
+        if self._closed:
+            return
         self.statuses[(ip, port)] = status
 
+        try:
+            self.result_ready.emit(row, status)
+        except RuntimeError:
 
-        self.result_ready.emit(row, status)
+            self._closed = True
+
+    def shutdown(self):
+        self._closed = True
+        self.executor.shutdown(wait=False, cancel_futures=True)
 
     def _apply_row(self, row: int, status: ServerStatus):
         self.table.setItem(row, 0, QTableWidgetItem(status.display_name))
@@ -300,6 +327,8 @@ class ServerTab(QWidget):
 
         state_item = QTableWidgetItem("● В сети" if status.online else "○ Не отвечает")
         state_item.setForeground(QColor(HOPE_GOLD if status.online else ASH))
+        if not status.online and status.error:
+            state_item.setToolTip(status.error)
         self.table.setItem(row, 4, state_item)
 
 
@@ -307,6 +336,36 @@ class ServerTab(QWidget):
         if btn is not None:
             btn.setEnabled(not is_full)
             btn.setText("Сервер полон" if is_full else "Подключиться")
+
+        self._apply_filters()
+
+    def _on_filter_toggled(self):
+        config = load_config()
+        config["server_filters"] = {
+            "hide_offline": self.hide_offline_checkbox.isChecked(),
+            "hide_full": self.hide_full_checkbox.isChecked(),
+        }
+        save_config(config)
+        self._apply_filters()
+
+    def _apply_filters(self):
+        hide_offline = self.hide_offline_checkbox.isChecked()
+        hide_full = self.hide_full_checkbox.isChecked()
+
+        for row, (ip, port, _name) in enumerate(self.server_defs):
+            status = self.statuses.get((ip, port))
+            if status is None:
+                self.table.setRowHidden(row, False)
+                continue
+
+            is_full = status.online and status.max_players > 0 and status.players >= status.max_players
+
+            hidden = False
+            if hide_offline and not status.online:
+                hidden = True
+            if hide_full and is_full:
+                hidden = True
+            self.table.setRowHidden(row, hidden)
 
 
 class UpdateDialog(QDialog):
@@ -461,8 +520,6 @@ class SettingsDialog(QDialog):
         fav_hint.setWordWrap(True)
         body_layout.addWidget(fav_hint)
 
-        body_layout.addSpacing(16)
-
         body_layout.addStretch()
         outer.addWidget(body, 1)
 
@@ -605,18 +662,9 @@ class LauncherWindow(QMainWindow):
         root.addWidget(TitleBar(self))
         root.addSpacing(4)
 
-        tabs = QTabWidget()
         self.home_tab = HomeTab()
-        tabs.addTab(self.home_tab, "Главная")
-        self.lobbies_tab = ServerTab(
-            LOBBIES,
-            empty_hint=(
-                "Список лобби пуст. Впиши реальные сервера в servers.py "
-                "(список LOBBIES) — формат: (ip, port, название)."
-            ),
-        )
-        tabs.addTab(self.lobbies_tab, "Лобби")
-        root.addWidget(tabs)
+        self.lobbies_tab = self.home_tab.lobbies_tab
+        root.addWidget(self.home_tab, 1)
 
         self.setCentralWidget(central)
 
@@ -685,6 +733,7 @@ class LauncherWindow(QMainWindow):
     def _quit_app(self):
         if self.tray_icon is not None:
             self.tray_icon.hide()
+        self.lobbies_tab.shutdown()
         QApplication.instance().quit()
 
     def closeEvent(self, event):
@@ -701,6 +750,7 @@ class LauncherWindow(QMainWindow):
         else:
             if self.tray_icon is not None:
                 self.tray_icon.hide()
+            self.lobbies_tab.shutdown()
             event.accept()
 
 

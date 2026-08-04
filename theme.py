@@ -30,6 +30,10 @@ QLabel {{
 QWidget#RootContainer {{
     border: 1px solid {PANEL_EDGE};
 }}
+QFrame#LobbyPanel {{
+    border: 1px solid {ACCENT};
+    background-color: {PANEL};
+}}
 QDialog#SettingsDialog {{
     background-color: {DIALOG_BG};
     border: 2px solid {ACCENT};
@@ -50,6 +54,7 @@ QCheckBox {{
     color: {BONE};
     font-size: 13px;
     spacing: 8px;
+    background-color: transparent;
 }}
 QCheckBox::indicator {{
     width: 16px;
