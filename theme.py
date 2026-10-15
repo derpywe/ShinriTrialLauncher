@@ -44,6 +44,13 @@ QFrame#SettingsHeader {{
 QWidget#SettingsBody {{
     background-color: {DIALOG_BG};
 }}
+QScrollArea#SettingsScrollArea {{
+    background-color: transparent;
+    border: none;
+}}
+QScrollArea#SettingsScrollArea > QWidget > QWidget {{
+    background-color: transparent;
+}}
 QLabel#SettingsSectionLabel {{
     color: {ACCENT};
     font-size: 11px;
@@ -250,6 +257,42 @@ QPushButton#RefreshButton:hover {{
     background-color: transparent;
 }}
 
+/* Кнопка на переполненном сервере — предлагает встать в очередь */
+QPushButton#FullButton {{
+    background-color: {PANEL};
+    color: #E8735E;
+    border: 1px solid #C0392B;
+    border-top: 1px solid #C0392B;
+    padding: 4px 14px;
+    font-weight: 700;
+    font-size: 12px;
+    min-height: 24px;
+}}
+QPushButton#FullButton:hover {{
+    background-color: #C0392B;
+    color: {BONE};
+    border-color: #C0392B;
+    border-top-color: #C0392B;
+}}
+
+/* Кнопка ожидания свободного места на переполненном сервере */
+QPushButton#WatchingButton {{
+    background-color: {PANEL};
+    color: {HOPE_GOLD};
+    border: 1px solid {HOPE_GOLD};
+    border-top: 1px solid {HOPE_GOLD};
+    padding: 4px 14px;
+    font-weight: 700;
+    font-size: 12px;
+    min-height: 24px;
+}}
+QPushButton#WatchingButton:hover {{
+    background-color: {PANEL_EDGE};
+    color: {BONE};
+    border-color: {HOPE_GOLD};
+    border-top-color: {HOPE_GOLD};
+}}
+
 /* ---------- Большие кнопки главного меню (Главная, справа внизу) ---------- */
 QPushButton#MenuButtonPrimary {{
     background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -305,6 +348,69 @@ QComboBox QAbstractItemView {{
     selection-background-color: {ACCENT};
     selection-color: {VOID_BLACK};
     outline: none;
+}}
+
+QLabel#FileSizeLabel {{
+    color: {ASH};
+    font-size: 10px;
+    padding: 10px 0;
+}}
+
+QPushButton#ClosePanelButton {{
+    background-color: transparent;
+    color: {ASH};
+    border: 1px solid {PANEL_EDGE};
+    border-top: 1px solid {PANEL_EDGE};
+    padding: 4px 12px;
+    font-size: 12px;
+}}
+QPushButton#ClosePanelButton:hover {{
+    background-color: #C0392B;
+    border-color: #C0392B;
+    border-top-color: #C0392B;
+    color: {BONE};
+}}
+
+/* ---------- Страница профиля Steam ---------- */
+QFrame#ProfileCard {{
+    background-color: {PANEL};
+    border: 1px solid {PANEL_EDGE};
+    border-left: 3px solid {ACCENT};
+}}
+QLabel#ProfileName {{
+    color: {BONE};
+    font-size: 20px;
+    font-weight: 700;
+}}
+QLabel#ProfileSubtitle {{
+    color: {HOPE_GOLD};
+    font-size: 12px;
+}}
+QLabel#ProfileLink {{
+    font-size: 11px;
+}}
+QLabel#ProfileKey {{
+    color: {ASH};
+    font-size: 12px;
+}}
+QLabel#ProfileValue {{
+    color: {BONE};
+    font-family: "{MONO_FONT}";
+    font-size: 12px;
+}}
+QLabel#ProfileValue:selected {{
+    background-color: {ACCENT};
+    color: {VOID_BLACK};
+}}
+
+/* ---------- Вывод игровой консоли ---------- */
+QPlainTextEdit#ConsoleOutput {{
+    background-color: #050403;
+    color: {HOPE_GOLD};
+    border: 1px solid {PANEL_EDGE};
+    font-family: "{MONO_FONT}";
+    font-size: 12px;
+    padding: 8px;
 }}
 
 /* ---------- Скроллбары ---------- */

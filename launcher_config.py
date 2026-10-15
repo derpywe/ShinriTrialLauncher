@@ -30,7 +30,7 @@ def save_config(data: Dict[str, Any]) -> None:
         pass
 
 
-def add_recent_server(ip: str, port: int, name: str, limit: int = 15) -> None:
+def add_recent_server(ip: str, port: int, name: str, limit: int = 10) -> None:
     config = load_config()
     recent = config.get("recent_servers", [])
     address = f"{ip}:{port}"
