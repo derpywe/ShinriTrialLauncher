@@ -34,11 +34,15 @@ def check_for_update(current_version: str, timeout: float = 5.0):
         return None
 
     assets = data.get("assets", [])
-    download_url = assets[0]["browser_download_url"] if assets else RELEASES_PAGE_URL
+    exe_url = ""
+    for asset in assets:
+        if asset.get("name", "").endswith(".exe"):
+            exe_url = asset["browser_download_url"]
+            break
 
     return {
         "version": latest_tag,
         "url": data.get("html_url", RELEASES_PAGE_URL),
-        "download_url": download_url,
+        "download_url": exe_url,
         "notes": data.get("body", ""),
     }

@@ -2,6 +2,7 @@ import sys
 import os
 import re
 import time
+import threading
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -9,10 +10,10 @@ from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 
 from PyQt6.QtCore import (
-    Qt, QTimer, QObject, pyqtSignal, QUrl, QPoint, QSize, QRectF,
+    Qt, QTimer, QObject, pyqtSignal, QPoint, QSize, QRectF,
 )
 from PyQt6.QtGui import (
-    QColor, QFont, QIcon, QPixmap, QAction, QPainter,
+    QColor, QIcon, QPixmap, QAction, QPainter,
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -40,6 +41,7 @@ from update_checker import check_for_update
 from notifications import (
     fetch_notifications, has_unread, mark_all_read,
 )
+from updater import install_update
 
 if getattr(sys, "frozen", False):
     BASE_DIR = Path(sys._MEIPASS)
@@ -91,12 +93,6 @@ def _make_bell_icon(color: str, size: int = 20) -> QIcon:
 
 
 class _ConnectionEvents(QObject):
-    """
-    Единая точка, через которую проходит любое подключение, инициированное
-    из лаунчера (Лобби, ENG Lobby, автоочередь, вкладка друзей). Вкладка
-    «Последние сервера» подписывается на неё, чтобы обновляться сразу же,
-    а не только когда её саму открывают/обновляют вручную.
-    """
     connected = pyqtSignal(str, int, str)
 
 
@@ -129,7 +125,6 @@ def is_server_unavailable(status: Optional[ServerStatus]) -> bool:
 class ServerTab(QWidget):
 
     COLUMNS = ["Название", "Карта", "Игроки", "Пинг", "Статус", ""]
-
 
     result_ready = pyqtSignal(int, object)
     queue_connected = pyqtSignal(str, str)
@@ -267,7 +262,6 @@ class ServerTab(QWidget):
 
         name = status.display_name if status else f"{ip}:{port}"
         connect_to_server(ip, port, name)
-
         self.refresh()
 
     def _start_watching(self, key: tuple):
@@ -285,8 +279,6 @@ class ServerTab(QWidget):
         self._apply_filters()
 
     def _refresh_watched(self):
-        # Быстрый прицельный опрос — только тех серверов, что стоят в очереди,
-        # раз в секунду, не трогая остальную таблицу.
         if self._closed or not self.watching:
             return
         for ip, port, name in self.server_defs:
@@ -320,30 +312,17 @@ class ServerTab(QWidget):
         if watching:
             btn.setText("Отменить")
             if not status.online:
-                btn.setToolTip(
-                    "Сервер сейчас недоступен (перезапуск?) — подключимся "
-                    "автоматически, как только он снова заработает. Нажми, "
-                    "чтобы отменить ожидание."
-                )
+                btn.setToolTip("Сервер сейчас недоступен (перезапуск?) — подключимся автоматически.")
             else:
-                btn.setToolTip(
-                    "В очереди на этот сервер — подключимся автоматически, как "
-                    "только освободится место. Нажми, чтобы отменить ожидание."
-                )
+                btn.setToolTip("В очереди на этот сервер — подключимся автоматически.")
             object_name = "WatchingButton"
         elif unavailable:
             btn.setText("Ждать сервер")
-            btn.setToolTip(
-                "Сервер сейчас недоступен. Нажми, чтобы дождаться, когда он "
-                "снова заработает, и подключиться первым."
-            )
+            btn.setToolTip("Сервер сейчас недоступен. Нажми, чтобы дождаться.")
             object_name = "FullButton"
         elif full:
             btn.setText("Ждать место")
-            btn.setToolTip(
-                "Сервер полон. Нажми, чтобы встать в очередь — подключимся "
-                "автоматически, как только освободится место."
-            )
+            btn.setToolTip("Сервер полон. Нажми, чтобы встать в очередь.")
             object_name = "FullButton"
         else:
             btn.setText("Подключиться")
@@ -359,11 +338,9 @@ class ServerTab(QWidget):
         if self._closed:
             return
         self.statuses[(ip, port)] = status
-
         try:
             self.result_ready.emit(row, status)
         except RuntimeError:
-
             self._closed = True
 
     def shutdown(self):
@@ -395,9 +372,6 @@ class ServerTab(QWidget):
         self.table.setItem(row, 4, state_item)
 
         if key in self.watching and status.online and not is_full:
-            # Сервер снова доступен и не полон (вернулся после недоступности
-            # или освободилось место) — подключаемся автоматически и снимаем
-            # его с наблюдения.
             self.watching.discard(key)
             if not self.watching and self.watch_timer.isActive():
                 self.watch_timer.stop()
@@ -472,19 +446,10 @@ class RecentServersTab(ServerTab):
         self.reload_from_history()
 
     def on_server_connected(self, ip: str, port: int):
-        # Подключение обнаружено в консоли игры (строка "Connecting to"/
-        # "Connected to" в console.log). Всегда добавляем/поднимаем сервер
-        # наверх и перерисовываем список — раньше тут была проверка "уже
-        # есть в истории -> ничего не делать", из-за которой повторные
-        # заходы на один и тот же сервер просто не обновляли вкладку.
         add_recent_server(ip, port, f"{ip}:{port}", limit=10)
         self.reload_from_history()
 
     def on_launcher_connected(self, ip: str, port: int, name: str):
-        # Подключение инициировано из самого лаунчера (Лобби/ENG Lobby/
-        # автоочередь/вкладка друзей) — connect_to_server() уже записал его
-        # в историю, тут только перерисовываем вкладку, чтобы сервер сразу
-        # появился в списке.
         self.reload_from_history()
 
 
@@ -1415,7 +1380,7 @@ class PlayersTab(QWidget):
         count = reset_encounter_counts()
         self.reload()
         self.count_label.setText(
-            f"Счётчики пересчитаны по истории сессий у {count} игроков."
+            f"Счётчики пересчитаны. Исправлено записей: {count}."
         )
 
     def _clear_database(self):
@@ -1562,9 +1527,6 @@ class ConsoleTab(QWidget):
         self._start_watching(silent=True)
 
     def _retry_autostart(self):
-        # Периодическая проверка: если слежение ещё не идёт (например, при
-        # старте лаунчера GMod ещё не был запущен) и пользователь сам его
-        # не останавливал — включаем, как только игра появится в процессах.
         if self._closed or not self._auto_retry_enabled:
             return
         if self.watcher is not None and self.watcher.is_running():
@@ -1698,10 +1660,6 @@ class ConsoleTab(QWidget):
         except ValueError:
             return
 
-        # Одно подключение обычно даёт в логе и "Connecting to", и
-        # "Connected to" — обе строки матчатся регуляркой. Не шлём сигнал
-        # второй раз подряд для того же адреса, чтобы не дёргать вкладку
-        # «Последние сервера» дважды на одно и то же подключение.
         key = (ip, port)
         now = time.monotonic()
         if key == self._last_connect_key and now - self._last_connect_time < 15:
@@ -1728,81 +1686,9 @@ class ConsoleTab(QWidget):
             self.watcher = None
 
 
-class UpdateDialog(QDialog):
-
-    def __init__(self, update_info: dict, parent=None):
-        super().__init__(parent)
-        self.update_info = update_info
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
-        self.setObjectName("SettingsDialog")
-        self.setFixedSize(460, 260)
-        if parent is not None:
-            geo = parent.geometry()
-            self.move(
-                geo.x() + (geo.width() - self.width()) // 2,
-                geo.y() + (geo.height() - self.height()) // 2,
-            )
-
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-
-        header = QFrame()
-        header.setObjectName("SettingsHeader")
-        header.setFixedHeight(44)
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(20, 0, 0, 0)
-        title = QLabel("ДОСТУПНО ОБНОВЛЕНИЕ")
-        title.setObjectName("TitleBarText")
-        header_layout.addWidget(title)
-        header_layout.addStretch()
-        close_btn = QPushButton("✕")
-        close_btn.setObjectName("TitleBarCloseButton")
-        close_btn.setFixedSize(44, 44)
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.clicked.connect(self.close)
-        header_layout.addWidget(close_btn)
-        outer.addWidget(header)
-
-        body = QWidget()
-        body.setObjectName("SettingsBody")
-        body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(28, 24, 28, 24)
-        body_layout.setSpacing(10)
-
-        version_label = QLabel(f"Новая версия: {update_info['version']}")
-        version_label.setObjectName("SettingsSectionLabel")
-        body_layout.addWidget(version_label)
-
-        notes = update_info.get("notes", "").strip()
-        if notes:
-            notes_label = QLabel(notes[:300])
-            notes_label.setObjectName("HintLabel")
-            notes_label.setWordWrap(True)
-            body_layout.addWidget(notes_label)
-
-        body_layout.addStretch()
-
-        buttons_row = QHBoxLayout()
-        later_btn = QPushButton("Позже")
-        later_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        later_btn.clicked.connect(self.close)
-        download_btn = QPushButton("Скачать")
-        download_btn.setObjectName("MenuButtonPrimary")
-        download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        download_btn.clicked.connect(self._on_download_clicked)
-        buttons_row.addWidget(later_btn)
-        buttons_row.addWidget(download_btn)
-        body_layout.addLayout(buttons_row)
-
-        outer.addWidget(body, 1)
-
-    def _on_download_clicked(self):
-        webbrowser.open(self.update_info["url"])
-        self.close()
-
-
 class NotificationsPopup(QDialog):
+
+    update_requested = pyqtSignal(str)
 
     def __init__(self, notifications, anchor_widget, parent_window):
         super().__init__(parent_window)
@@ -1812,7 +1698,6 @@ class NotificationsPopup(QDialog):
         self.setObjectName("NotificationsPopup")
         self.setFixedWidth(420)
 
-        # Отступ 2px по краю — чтобы QScrollArea не перекрывал рамку QDialog.
         outer = QVBoxLayout(self)
         outer.setContentsMargins(2, 2, 2, 2)
         outer.setSpacing(0)
@@ -1884,7 +1769,22 @@ class NotificationsPopup(QDialog):
             )
             box.addWidget(body_lbl)
 
+        if item.get("is_update"):
+            btn = QPushButton("Обновить лаунчер")
+            btn.setObjectName("MenuButtonPrimary")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFixedHeight(30)
+            btn.clicked.connect(lambda _, i=item: self._on_update_clicked(i))
+            box.addWidget(btn)
+
         return frame
+
+    def _on_update_clicked(self, item):
+        if item.get("download_url"):
+            self.update_requested.emit(item["download_url"])
+        elif item.get("release_url"):
+            webbrowser.open(item["release_url"])
+        self.accept()
 
     def _fit_height(self, count: int):
         if count == 0:
@@ -2046,6 +1946,13 @@ class SettingsDialog(QDialog):
         body_layout.addWidget(steam_hint)
 
         body_layout.addStretch()
+
+        # Добавляем версию в самый низ по центру
+        version_label = QLabel(f"Версия лаунчера: {__version__}")
+        version_label.setObjectName("FileSizeLabel")
+        version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        body_layout.addWidget(version_label)
+
         scroll.setWidget(body)
         outer.addWidget(scroll, 1)
 
@@ -2264,10 +2171,7 @@ class LauncherWindow(QMainWindow):
         self.timer.start(REFRESH_INTERVAL_MS)
 
         self._init_tray_icon()
-        self._check_update_executor = ThreadPoolExecutor(max_workers=1)
-        self.update_check_done.connect(self._on_update_check_done)
-        QTimer.singleShot(0, self._check_for_update)
-
+        
         self._notifications: list = []
         self._notifications_executor = ThreadPoolExecutor(max_workers=1)
         self.notifications_loaded.connect(self._on_notifications_loaded)
@@ -2276,33 +2180,35 @@ class LauncherWindow(QMainWindow):
         self._notifications_timer.start(30 * 60 * 1000)
         self._load_notifications()
 
-    update_check_done = pyqtSignal(object)
     notifications_loaded = pyqtSignal(list)
-
-    def _check_for_update(self):
-        self._check_update_executor.submit(self._check_update_worker)
-
-    def _check_update_worker(self):
-        try:
-            info = check_for_update(__version__)
-        except Exception:
-            info = None
-        self.update_check_done.emit(info)
-
-    def _on_update_check_done(self, info):
-        if info is None:
-            return
-        dialog = UpdateDialog(info, self)
-        dialog.show()
 
     def _load_notifications(self):
         self._notifications_executor.submit(self._fetch_notifications_worker)
 
     def _fetch_notifications_worker(self):
+        items = []
         try:
             items = fetch_notifications()
         except Exception:
-            items = []
+            pass
+
+        # Проверка обновлений и добавление их в уведомления
+        try:
+            update_info = check_for_update(__version__)
+            if update_info:
+                items = [i for i in items if not i.get("is_update")]
+                items.insert(0, {
+                    "id": f"update-{update_info['version']}",
+                    "title": f"Доступно обновление {update_info['version']}",
+                    "body": update_info.get("notes", "Новая версия лаунчера доступна для скачивания."),
+                    "date": "",
+                    "is_update": True,
+                    "release_url": update_info.get("url", ""),
+                    "download_url": update_info.get("download_url", ""),
+                })
+        except Exception:
+            pass
+
         self.notifications_loaded.emit(items)
 
     def _on_notifications_loaded(self, items: list):
@@ -2311,6 +2217,7 @@ class LauncherWindow(QMainWindow):
 
     def show_notifications_popup(self, anchor_btn):
         popup = NotificationsPopup(self._notifications, anchor_btn, self)
+        popup.update_requested.connect(self._perform_update)
         popup.finished.connect(
             lambda _: self.title_bar.set_notifications_state(
                 has_unread(self._notifications)
@@ -2319,6 +2226,34 @@ class LauncherWindow(QMainWindow):
         if has_unread(self._notifications):
             mark_all_read(self._notifications)
         popup.show()
+
+    def _perform_update(self, url):
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(
+                self, "Обновление", 
+                "Вы запустили лаунчер из исходного кода.\n"
+                "Автоматическое обновление доступно только для собранного .exe файла."
+            )
+            return
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Обновление")
+        msg.setText("Скачивание обновления и перезапуск...\nПожалуйста, подождите.")
+        msg.setStandardButtons(QMessageBox.StandardButton.NoButton)
+        msg.show()
+
+        def worker():
+            err = install_update(url)
+            if err:
+                QTimer.singleShot(0, lambda: self._show_update_error(err, msg))
+            else:
+                QTimer.singleShot(0, QApplication.instance().quit)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_update_error(self, err, msg_box):
+        msg_box.close()
+        QMessageBox.critical(self, "Ошибка обновления", err)
 
     def _on_status_snapshot(self, snapshot):
         self.status_tab.apply_snapshot(snapshot)
@@ -2416,8 +2351,6 @@ class LauncherWindow(QMainWindow):
 
 
 def main():
-
-
     if sys.platform == "win32":
         try:
             import ctypes
