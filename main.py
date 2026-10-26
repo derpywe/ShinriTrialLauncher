@@ -2,7 +2,6 @@ import sys
 import os
 import re
 import time
-import threading
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -41,7 +40,6 @@ from update_checker import check_for_update
 from notifications import (
     fetch_notifications, has_unread, mark_all_read,
 )
-from updater import install_update
 
 if getattr(sys, "frozen", False):
     BASE_DIR = Path(sys._MEIPASS)
@@ -1688,8 +1686,6 @@ class ConsoleTab(QWidget):
 
 class NotificationsPopup(QDialog):
 
-    update_requested = pyqtSignal(str)
-
     def __init__(self, notifications, anchor_widget, parent_window):
         super().__init__(parent_window)
         self.setWindowFlags(
@@ -1770,20 +1766,19 @@ class NotificationsPopup(QDialog):
             box.addWidget(body_lbl)
 
         if item.get("is_update"):
-            btn = QPushButton("Обновить лаунчер")
+            btn = QPushButton("Скачать обновление")
             btn.setObjectName("MenuButtonPrimary")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFixedHeight(30)
-            btn.clicked.connect(lambda _, i=item: self._on_update_clicked(i))
+            # Просто открываем страницу релиза в браузере
+            btn.clicked.connect(lambda _, url=item.get("release_url"): self._on_download_clicked(url))
             box.addWidget(btn)
 
         return frame
 
-    def _on_update_clicked(self, item):
-        if item.get("download_url"):
-            self.update_requested.emit(item["download_url"])
-        elif item.get("release_url"):
-            webbrowser.open(item["release_url"])
+    def _on_download_clicked(self, url):
+        if url:
+            webbrowser.open(url)
         self.accept()
 
     def _fit_height(self, count: int):
@@ -2217,7 +2212,6 @@ class LauncherWindow(QMainWindow):
 
     def show_notifications_popup(self, anchor_btn):
         popup = NotificationsPopup(self._notifications, anchor_btn, self)
-        popup.update_requested.connect(self._perform_update)
         popup.finished.connect(
             lambda _: self.title_bar.set_notifications_state(
                 has_unread(self._notifications)
@@ -2226,34 +2220,6 @@ class LauncherWindow(QMainWindow):
         if has_unread(self._notifications):
             mark_all_read(self._notifications)
         popup.show()
-
-    def _perform_update(self, url):
-        if not getattr(sys, "frozen", False):
-            QMessageBox.information(
-                self, "Обновление", 
-                "Вы запустили лаунчер из исходного кода.\n"
-                "Автоматическое обновление доступно только для собранного .exe файла."
-            )
-            return
-
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Обновление")
-        msg.setText("Скачивание обновления и перезапуск...\nПожалуйста, подождите.")
-        msg.setStandardButtons(QMessageBox.StandardButton.NoButton)
-        msg.show()
-
-        def worker():
-            err = install_update(url)
-            if err:
-                QTimer.singleShot(0, lambda: self._show_update_error(err, msg))
-            else:
-                QTimer.singleShot(0, QApplication.instance().quit)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _show_update_error(self, err, msg_box):
-        msg_box.close()
-        QMessageBox.critical(self, "Ошибка обновления", err)
 
     def _on_status_snapshot(self, snapshot):
         self.status_tab.apply_snapshot(snapshot)
