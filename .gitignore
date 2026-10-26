@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Окружение
+venv/
+.venv/
+env/
+
+# Сборки PyInstaller
+build/
+dist/
+*.spec
+
+# Локальные настройки ИИ и IDE
+.claude/
+.idea/
+.vscode/
+
+# Системный мусор
+.DS_Store
+Thumbs.db
+*.log
+*.tmp

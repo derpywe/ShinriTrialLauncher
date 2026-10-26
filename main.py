@@ -8,8 +8,12 @@ from pathlib import Path
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 
-from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QUrl, QPoint, QSize
-from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QAction
+from PyQt6.QtCore import (
+    Qt, QTimer, QObject, pyqtSignal, QUrl, QPoint, QSize, QRectF,
+)
+from PyQt6.QtGui import (
+    QColor, QFont, QIcon, QPixmap, QAction, QPainter,
+)
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QTableWidget, QTableWidgetItem, QPushButton, QLabel,
@@ -33,6 +37,9 @@ from launcher_config import load_config, save_config, add_recent_server, get_rec
 from theme import THEME_QSS, HOPE_GOLD, ACCENT, ASH, BONE
 from version import __version__
 from update_checker import check_for_update
+from notifications import (
+    fetch_notifications, has_unread, mark_all_read,
+)
 
 if getattr(sys, "frozen", False):
     BASE_DIR = Path(sys._MEIPASS)
@@ -62,6 +69,25 @@ def _format_size(num_bytes: int) -> str:
             return f"{num_bytes:.1f} {unit}"
         num_bytes /= 1024
     return f"{num_bytes:.1f} ГБ"
+
+
+def _make_bell_icon(color: str, size: int = 20) -> QIcon:
+    """Рисует колокольчик вручную, чтобы не зависеть от наличия глифа в шрифте."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(color))
+    w = h = float(size)
+    # Купол — верхняя половина овала, плоское основание снизу
+    painter.drawPie(QRectF(w * 0.20, h * 0.10, w * 0.60, h * 0.55), 0, 180 * 16)
+    # Основание колокольчика
+    painter.drawRect(QRectF(w * 0.17, h * 0.60, w * 0.66, h * 0.09))
+    # Язычок
+    painter.drawEllipse(QRectF(w * 0.42, h * 0.74, w * 0.16, h * 0.16))
+    painter.end()
+    return QIcon(pixmap)
 
 
 class _ConnectionEvents(QObject):
@@ -1776,6 +1802,116 @@ class UpdateDialog(QDialog):
         self.close()
 
 
+class NotificationsPopup(QDialog):
+
+    def __init__(self, notifications, anchor_widget, parent_window):
+        super().__init__(parent_window)
+        self.setWindowFlags(
+            Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
+        )
+        self.setObjectName("NotificationsPopup")
+        self.setFixedWidth(420)
+
+        # Отступ 2px по краю — чтобы QScrollArea не перекрывал рамку QDialog.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(2, 2, 2, 2)
+        outer.setSpacing(0)
+
+        header = QFrame()
+        header.setObjectName("NotificationsHeader")
+        header.setFixedHeight(38)
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(14, 0, 0, 0)
+        title = QLabel("УВЕДОМЛЕНИЯ")
+        title.setObjectName("TitleBarText")
+        hl.addWidget(title)
+        outer.addWidget(header)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("NotificationsScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        body = QWidget()
+        body.setObjectName("NotificationsBody")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(12, 12, 12, 12)
+        body_layout.setSpacing(10)
+
+        if notifications:
+            for item in notifications:
+                body_layout.addWidget(self._build_item(item))
+        else:
+            empty = QLabel("Уведомлений пока нет.")
+            empty.setObjectName("HintLabel")
+            empty.setWordWrap(True)
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            body_layout.addWidget(empty)
+
+        body_layout.addStretch()
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+
+        self._fit_height(len(notifications))
+        self._position(anchor_widget)
+
+    def _build_item(self, item: dict) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("NotificationItem")
+        box = QVBoxLayout(frame)
+        box.setContentsMargins(12, 10, 12, 10)
+        box.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        title_lbl = QLabel(item["title"])
+        title_lbl.setObjectName("NotificationTitle")
+        title_lbl.setWordWrap(True)
+        top.addWidget(title_lbl, 1)
+        if item.get("date"):
+            date_lbl = QLabel(item["date"])
+            date_lbl.setObjectName("NotificationDate")
+            top.addWidget(date_lbl, 0, Qt.AlignmentFlag.AlignTop)
+        box.addLayout(top)
+
+        if item.get("body"):
+            body_lbl = QLabel(item["body"])
+            body_lbl.setObjectName("NotificationBody")
+            body_lbl.setWordWrap(True)
+            body_lbl.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            box.addWidget(body_lbl)
+
+        return frame
+
+    def _fit_height(self, count: int):
+        if count == 0:
+            self.setFixedHeight(220)
+            return
+        estimate = 60 + count * 125
+        self.setFixedHeight(max(340, min(estimate, 680)))
+
+    def _position(self, anchor):
+        btn_top = anchor.mapToGlobal(QPoint(0, 0))
+        btn_bottom = anchor.mapToGlobal(QPoint(0, anchor.height()))
+        x = btn_bottom.x() + anchor.width() - self.width()
+        y = btn_bottom.y() + 4
+
+        screen = anchor.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            geo = screen.availableGeometry()
+            if y + self.height() > geo.bottom():
+                y = btn_top.y() - self.height() - 4
+            if x < geo.left():
+                x = geo.left() + 4
+            if x + self.width() > geo.right():
+                x = geo.right() - self.width() - 4
+
+        self.move(x, y)
+
+
 class SettingsDialog(QDialog):
 
     def __init__(self, parent=None):
@@ -1980,6 +2116,15 @@ class TitleBar(QFrame):
 
         layout.addStretch()
 
+        self.notifications_btn = QPushButton()
+        self.notifications_btn.setObjectName("TitleBarButton")
+        self.notifications_btn.setFixedSize(46, 40)
+        self.notifications_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.notifications_btn.setToolTip("Уведомления")
+        self.notifications_btn.setIcon(_make_bell_icon(ASH))
+        self.notifications_btn.setIconSize(QSize(20, 20))
+        self.notifications_btn.clicked.connect(self._on_notifications_clicked)
+
         settings_btn = QPushButton("⚙")
         settings_btn.setObjectName("TitleBarButton")
         settings_btn.setFixedSize(46, 40)
@@ -1998,9 +2143,25 @@ class TitleBar(QFrame):
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_btn.clicked.connect(self.target_window.close)
 
+        layout.addWidget(self.notifications_btn)
         layout.addWidget(settings_btn)
         layout.addWidget(min_btn)
         layout.addWidget(close_btn)
+
+    def _on_notifications_clicked(self):
+        self.target_window.show_notifications_popup(self.notifications_btn)
+
+    def set_notifications_state(self, unread: bool):
+        name = "TitleBarButtonNotified" if unread else "TitleBarButton"
+        if self.notifications_btn.objectName() != name:
+            self.notifications_btn.setObjectName(name)
+            self.notifications_btn.style().unpolish(self.notifications_btn)
+            self.notifications_btn.style().polish(self.notifications_btn)
+        color = HOPE_GOLD if unread else ASH
+        self.notifications_btn.setIcon(_make_bell_icon(color))
+        self.notifications_btn.setToolTip(
+            "Уведомления (есть новые)" if unread else "Уведомления"
+        )
 
     def _open_settings(self):
         if self._settings_dialog is None:
@@ -2045,7 +2206,8 @@ class LauncherWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        root.addWidget(TitleBar(self))
+        self.title_bar = TitleBar(self)
+        root.addWidget(self.title_bar)
         root.addSpacing(4)
 
         tabs = QTabWidget()
@@ -2106,7 +2268,16 @@ class LauncherWindow(QMainWindow):
         self.update_check_done.connect(self._on_update_check_done)
         QTimer.singleShot(0, self._check_for_update)
 
+        self._notifications: list = []
+        self._notifications_executor = ThreadPoolExecutor(max_workers=1)
+        self.notifications_loaded.connect(self._on_notifications_loaded)
+        self._notifications_timer = QTimer(self)
+        self._notifications_timer.timeout.connect(self._load_notifications)
+        self._notifications_timer.start(30 * 60 * 1000)
+        self._load_notifications()
+
     update_check_done = pyqtSignal(object)
+    notifications_loaded = pyqtSignal(list)
 
     def _check_for_update(self):
         self._check_update_executor.submit(self._check_update_worker)
@@ -2123,6 +2294,31 @@ class LauncherWindow(QMainWindow):
             return
         dialog = UpdateDialog(info, self)
         dialog.show()
+
+    def _load_notifications(self):
+        self._notifications_executor.submit(self._fetch_notifications_worker)
+
+    def _fetch_notifications_worker(self):
+        try:
+            items = fetch_notifications()
+        except Exception:
+            items = []
+        self.notifications_loaded.emit(items)
+
+    def _on_notifications_loaded(self, items: list):
+        self._notifications = items
+        self.title_bar.set_notifications_state(has_unread(items))
+
+    def show_notifications_popup(self, anchor_btn):
+        popup = NotificationsPopup(self._notifications, anchor_btn, self)
+        popup.finished.connect(
+            lambda _: self.title_bar.set_notifications_state(
+                has_unread(self._notifications)
+            )
+        )
+        if has_unread(self._notifications):
+            mark_all_read(self._notifications)
+        popup.show()
 
     def _on_status_snapshot(self, snapshot):
         self.status_tab.apply_snapshot(snapshot)
@@ -2191,6 +2387,7 @@ class LauncherWindow(QMainWindow):
         self.status_tab.shutdown()
         self.players_tab.shutdown()
         self.console_tab.shutdown()
+        self._notifications_executor.shutdown(wait=False, cancel_futures=True)
         QApplication.instance().quit()
 
     def closeEvent(self, event):
@@ -2214,6 +2411,7 @@ class LauncherWindow(QMainWindow):
             self.status_tab.shutdown()
             self.players_tab.shutdown()
             self.console_tab.shutdown()
+            self._notifications_executor.shutdown(wait=False, cancel_futures=True)
             event.accept()
 
 

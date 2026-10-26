@@ -116,6 +116,21 @@ QPushButton#TitleBarCloseButton:hover {{
     color: {BONE};
 }}
 
+/* ---------- Кнопка уведомлений в заголовке (есть новое) ---------- */
+QPushButton#TitleBarButtonNotified {{
+    background-color: transparent;
+    color: {HOPE_GOLD};
+    border: none;
+    border-top: none;
+    border-radius: 0;
+    font-size: 14px;
+    font-weight: 700;
+}}
+QPushButton#TitleBarButtonNotified:hover {{
+    background-color: {PANEL_EDGE};
+    color: {BONE};
+}}
+
 /* ---------- Заголовок приложения ---------- */
 QLabel#AppTitle {{
     color: {BONE};
@@ -411,6 +426,44 @@ QPlainTextEdit#ConsoleOutput {{
     font-family: "{MONO_FONT}";
     font-size: 12px;
     padding: 8px;
+}}
+
+/* ---------- Всплывающее окно уведомлений ---------- */
+QDialog#NotificationsPopup {{
+    background-color: {DIALOG_BG};
+    border: 2px solid {ACCENT};
+}}
+QFrame#NotificationsHeader {{
+    background-color: {DIALOG_HEADER};
+    border-bottom: 1px solid {PANEL_EDGE};
+}}
+QWidget#NotificationsBody {{
+    background-color: {DIALOG_BG};
+}}
+QScrollArea#NotificationsScroll {{
+    background-color: transparent;
+    border: none;
+}}
+QScrollArea#NotificationsScroll > QWidget > QWidget {{
+    background-color: transparent;
+}}
+QFrame#NotificationItem {{
+    background-color: {PANEL};
+    border: 1px solid {PANEL_EDGE};
+    border-left: 3px solid {ACCENT};
+}}
+QLabel#NotificationTitle {{
+    color: {BONE};
+    font-weight: 700;
+    font-size: 13px;
+}}
+QLabel#NotificationDate {{
+    color: {ASH};
+    font-size: 10px;
+}}
+QLabel#NotificationBody {{
+    color: {BONE};
+    font-size: 12px;
 }}
 
 /* ---------- Скроллбары ---------- */
