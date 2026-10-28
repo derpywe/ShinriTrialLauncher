@@ -51,9 +51,3 @@
 - **PyQt6** (графический интерфейс)
 - **python-a2s** (протокол Source Engine Query для опроса серверов)
 - **requests** (Steam Web API и проверка обновлений)
-
-## Установка и запуск (из исходников)
-
-1. Установи зависимости:
-   ```bash
-   pip install -r requirements.txt
