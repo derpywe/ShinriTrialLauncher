@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QTabWidget, QTableWidget, QTableWidgetItem, QPushButton, QLabel,
     QHeaderView, QAbstractItemView, QFrame, QScrollArea, QComboBox, QDialog,
     QCheckBox, QSystemTrayIcon, QMenu, QLineEdit, QPlainTextEdit, QFileDialog,
-    QGridLayout, QMessageBox
+    QGridLayout, QMessageBox, QStackedWidget
 )
 
 from servers import LOBBIES, ENG_LOBBIES
@@ -40,6 +40,8 @@ from update_checker import check_for_update
 from notifications import (
     fetch_notifications, has_unread, mark_all_read,
 )
+from fast_games_db import get_fast_games, add_fast_game, migrate_from_players_db
+from uid_search_tab import UidSearchTab
 
 if getattr(sys, "frozen", False):
     BASE_DIR = Path(sys._MEIPASS)
@@ -209,8 +211,11 @@ class ServerTab(QWidget):
     def _build_rows(self):
         if self.hint_label is not None:
             self.hint_label.setVisible(len(self.server_defs) == 0)
+            
         self.table.setRowCount(len(self.server_defs))
         self.row_for_key = {}
+        self.buttons = {}
+        
         for row, (ip, port, name) in enumerate(self.server_defs):
             self.row_for_key[(ip, port)] = row
             self.table.setItem(row, 0, QTableWidgetItem("Загрузка..."))
@@ -347,6 +352,9 @@ class ServerTab(QWidget):
         self.executor.shutdown(wait=False, cancel_futures=True)
 
     def _apply_row(self, row: int, status: ServerStatus):
+        if row >= self.table.rowCount():
+            return
+
         self.table.setItem(row, 0, QTableWidgetItem(status.display_name))
         self.table.setItem(row, 1, QTableWidgetItem(status.map_name or "—"))
 
@@ -1277,16 +1285,10 @@ class PlayersTab(QWidget):
         )
         fix_btn.clicked.connect(self._fix_counts)
 
-        clear_btn = QPushButton("Очистить базу")
-        clear_btn.setObjectName("RefreshButton")
-        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        clear_btn.clicked.connect(self._clear_database)
-
         top_row.addWidget(self.search_input, 1)
         top_row.addWidget(self.only_noted_checkbox)
         top_row.addWidget(self.sort_combo)
         top_row.addWidget(fix_btn)
-        top_row.addWidget(clear_btn)
         top_row.addWidget(refresh_btn)
         layout.addLayout(top_row)
 
@@ -1381,24 +1383,196 @@ class PlayersTab(QWidget):
             f"Счётчики пересчитаны. Исправлено записей: {count}."
         )
 
-    def _clear_database(self):
-        answer = QMessageBox.question(
-            self,
-            "Очистить базу игроков",
-            "Удалить всех игроков вместе с историей встреч и заметками?\n"
-            "Это действие нельзя отменить.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        clear_all()
-        self.detail_panel.close_panel()
-        self.reload()
-
     def _on_row_clicked(self, row: int, _column: int):
         if 0 <= row < len(self._visible):
             self.detail_panel.show_player(self._visible[row].get("steam_id64", ""))
+
+    def shutdown(self):
+        self._closed = True
+
+
+class FastGamesTab(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._closed = False
+        self._games = []
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.stacked = QStackedWidget()
+        layout.addWidget(self.stacked)
+
+        # --- Страница 1: Список игр ---
+        self.list_page = QWidget()
+        list_layout = QVBoxLayout(self.list_page)
+        list_layout.setContentsMargins(14, 12, 14, 14)
+        list_layout.setSpacing(10)
+
+        top_row = QHBoxLayout()
+        self.count_label = QLabel("История быстрых игр")
+        self.count_label.setObjectName("ProfileName")
+        top_row.addWidget(self.count_label)
+        top_row.addStretch()
+
+        migrate_btn = QPushButton("Спарсить историю")
+        migrate_btn.setObjectName("RefreshButton")
+        migrate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        migrate_btn.setToolTip("Найти быстрые игры в старой базе игроков и перенести их сюда")
+        migrate_btn.clicked.connect(self._on_migrate_clicked)
+        top_row.addWidget(migrate_btn)
+
+        refresh_btn = QPushButton("⟳  Обновить")
+        refresh_btn.setObjectName("RefreshButton")
+        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        refresh_btn.clicked.connect(self.reload_list)
+        top_row.addWidget(refresh_btn)
+        list_layout.addLayout(top_row)
+
+        self.games_table = QTableWidget(0, 4)
+        self.games_table.setHorizontalHeaderLabels(["Дата", "Название сервера", "Карта", "Игроки"])
+        self.games_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.games_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.games_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.games_table.verticalHeader().setVisible(False)
+        self.games_table.setAlternatingRowColors(True)
+        self.games_table.setShowGrid(False)
+        self.games_table.verticalHeader().setDefaultSectionSize(38)
+        gh = self.games_table.horizontalHeader()
+        gh.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        gh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        gh.setSectionsMovable(False)
+        self.games_table.setColumnWidth(0, 140)
+        self.games_table.setColumnWidth(2, 130)
+        self.games_table.setColumnWidth(3, 80)
+        self.games_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.games_table.cellClicked.connect(self._on_game_clicked)
+        list_layout.addWidget(self.games_table, 1)
+
+        self.empty_label = QLabel(
+            "Пока пусто. Зайди на сервер и напиши 'status' в консоли. "
+            "Если название сервера содержит 'Быстрая игра', она появится здесь. "
+            "Также можно нажать «Спарсить историю», чтобы найти старые игры."
+        )
+        self.empty_label.setObjectName("HintLabel")
+        self.empty_label.setWordWrap(True)
+        list_layout.addWidget(self.empty_label)
+
+        self.stacked.addWidget(self.list_page)
+
+        # --- Страница 2: Детали игры ---
+        self.detail_page = QWidget()
+        detail_layout = QVBoxLayout(self.detail_page)
+        detail_layout.setContentsMargins(14, 12, 14, 14)
+        detail_layout.setSpacing(10)
+
+        back_row = QHBoxLayout()
+        back_btn = QPushButton("←  Назад к списку")
+        back_btn.setObjectName("RefreshButton")
+        back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        back_btn.clicked.connect(lambda: self.stacked.setCurrentIndex(0))
+        back_row.addWidget(back_btn)
+        back_row.addStretch()
+        detail_layout.addLayout(back_row)
+
+        self.game_title = QLabel("")
+        self.game_title.setObjectName("ProfileName")
+        detail_layout.addWidget(self.game_title)
+
+        self.game_meta = QLabel("")
+        self.game_meta.setObjectName("ProfileSubtitle")
+        detail_layout.addWidget(self.game_meta)
+
+        self.players_table = DeselectableTable(0, 2)
+        self.players_table.setHorizontalHeaderLabels(["Ник", "SteamID"])
+        self.players_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.players_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.players_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.players_table.verticalHeader().setVisible(False)
+        self.players_table.setAlternatingRowColors(True)
+        self.players_table.setShowGrid(False)
+        self.players_table.verticalHeader().setDefaultSectionSize(34)
+        ph = self.players_table.horizontalHeader()
+        ph.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        ph.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        ph.setSectionsMovable(False)
+        self.players_table.setColumnWidth(1, 155)
+        self.players_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.players_table.cellClicked.connect(self._on_player_clicked)
+        detail_layout.addWidget(self.players_table, 1)
+
+        self.detail_panel = PlayerDetailPanel()
+        self.detail_panel.panel_closed.connect(self.players_table.reset_selection)
+        detail_layout.addWidget(self.detail_panel)
+
+        self.stacked.addWidget(self.detail_page)
+
+        self.reload_list()
+        
+        # Автоматически парсим старую базу при первом открытии, если история пуста
+        if not self._games:
+            self._on_migrate_clicked()
+
+    def _on_migrate_clicked(self):
+        count = migrate_from_players_db()
+        self.reload_list()
+        if count > 0:
+            QMessageBox.information(self, "Миграция", f"Успешно найдено и добавлено игр: {count}")
+
+    def on_status_snapshot(self, snapshot):
+        if self._closed:
+            return
+        # Функция add_fast_game сама проверит, быстрая это игра или нет, 
+        # и не создаст дубликат, если игра та же.
+        if add_fast_game(snapshot):
+            self.reload_list()
+
+    def reload_list(self):
+        if self._closed:
+            return
+        self._games = get_fast_games()
+        self.games_table.setRowCount(len(self._games))
+        
+        self.empty_label.setVisible(len(self._games) == 0)
+
+        for row, game in enumerate(self._games):
+            date_str = game.get("created_at", "").replace("T", " ")[:16]
+            self.games_table.setItem(row, 0, QTableWidgetItem(date_str))
+            # Показываем именно текстовое имя (hostname), а не IP
+            self.games_table.setItem(row, 1, QTableWidgetItem(game.get("hostname", "—")))
+            self.games_table.setItem(row, 2, QTableWidgetItem(game.get("map_name", "—")))
+            self.games_table.setItem(row, 3, QTableWidgetItem(str(len(game.get("players", [])))))
+
+    def _on_game_clicked(self, row: int, _column: int):
+        if 0 <= row < len(self._games):
+            game = self._games[row]
+            self.detail_panel.close_panel() # Закрываем панель при смене игры
+            
+            date_str = game.get("created_at", "").replace("T", " ")[:16]
+            # В заголовке выводим название, а в мета-данных - дату
+            self.game_title.setText(game.get("hostname", "Быстрая игра"))
+            self.game_meta.setText(
+                f"Дата регистрации: {date_str}   •   Карта: {game.get('map_name', '—')}"
+            )
+
+            players = game.get("players", [])
+            self.players_table.setRowCount(len(players))
+            for prow, player in enumerate(players):
+                name_item = QTableWidgetItem(player.get("name", "—"))
+                # Сохраняем steam_id64 в скрытые данные ячейки для открытия профиля
+                name_item.setData(Qt.ItemDataRole.UserRole, player.get("steam_id64", ""))
+                self.players_table.setItem(prow, 0, name_item)
+                
+                self.players_table.setItem(prow, 1, QTableWidgetItem(player.get("steam_id", "—")))
+
+            self.stacked.setCurrentIndex(1)
+
+    def _on_player_clicked(self, row: int, _column: int):
+        item = self.players_table.item(row, 0)
+        if item:
+            steam_id64 = item.data(Qt.ItemDataRole.UserRole)
+            if steam_id64:
+                self.detail_panel.show_player(steam_id64)
 
     def shutdown(self):
         self._closed = True
@@ -2113,6 +2287,10 @@ class LauncherWindow(QMainWindow):
         root.addSpacing(4)
 
         tabs = QTabWidget()
+        
+        # Отключаем стрелочки прокрутки и включаем расширение вкладок, чтобы они уместились
+        tabs.setUsesScrollButtons(False)
+        tabs.tabBar().setExpanding(True)
 
         self.lobbies_tab = ServerTab(
             LOBBIES,
@@ -2136,7 +2314,10 @@ class LauncherWindow(QMainWindow):
 
         self.recent_tab = RecentServersTab()
         connection_events.connected.connect(self.recent_tab.on_launcher_connected)
-        tabs.addTab(self.recent_tab, "Последние сервера")
+        tabs.addTab(self.recent_tab, "Последние")
+
+        self.fast_games_tab = FastGamesTab()
+        tabs.addTab(self.fast_games_tab, "История игр")
 
         self.friends_tab = FriendsTab()
         self.friends_tab.friend_entered_lobby.connect(self._on_friend_entered_lobby)
@@ -2149,11 +2330,15 @@ class LauncherWindow(QMainWindow):
         tabs.addTab(self.players_tab, "Игроки")
 
         self.profile_tab = ProfileTab()
-        tabs.addTab(self.profile_tab, "Профиль Steam")
+        tabs.addTab(self.profile_tab, "Профиль")
+
+        self.uid_tab = UidSearchTab()
+        tabs.addTab(self.uid_tab, "Поиск по UID")
 
         self.console_tab = ConsoleTab()
         self.console_tab.server_connected.connect(self.recent_tab.on_server_connected)
         self.console_tab.status_ready.connect(self._on_status_snapshot)
+        self.console_tab.status_ready.connect(self.fast_games_tab.on_status_snapshot)
         tabs.addTab(self.console_tab, "Консоль")
 
         root.addWidget(tabs)
@@ -2287,6 +2472,8 @@ class LauncherWindow(QMainWindow):
         self.profile_tab.shutdown()
         self.status_tab.shutdown()
         self.players_tab.shutdown()
+        self.fast_games_tab.shutdown()
+        self.uid_tab.shutdown()
         self.console_tab.shutdown()
         self._notifications_executor.shutdown(wait=False, cancel_futures=True)
         QApplication.instance().quit()
@@ -2311,6 +2498,8 @@ class LauncherWindow(QMainWindow):
             self.profile_tab.shutdown()
             self.status_tab.shutdown()
             self.players_tab.shutdown()
+            self.fast_games_tab.shutdown()
+            self.uid_tab.shutdown()
             self.console_tab.shutdown()
             self._notifications_executor.shutdown(wait=False, cancel_futures=True)
             event.accept()
