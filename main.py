@@ -3,7 +3,8 @@ import os
 import re
 import time
 import webbrowser
-from datetime import datetime
+import calendar
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -12,7 +13,7 @@ from PyQt6.QtCore import (
     Qt, QTimer, QObject, pyqtSignal, QPoint, QSize, QRectF,
 )
 from PyQt6.QtGui import (
-    QColor, QIcon, QPixmap, QAction, QPainter,
+    QColor, QIcon, QPixmap, QAction, QPainter, QPen,
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -22,7 +23,7 @@ from PyQt6.QtWidgets import (
     QGridLayout, QMessageBox, QStackedWidget
 )
 
-from servers import LOBBIES, ENG_LOBBIES
+from servers import LOBBIES, EU_LOBBIES
 from server_query import query_server, ServerStatus
 from console_log import ConsoleLogWatcher, find_console_log, find_gmod_dirs, is_gmod_running
 from steam_friends import get_friends_in_gmod, resolve_steam_id, API_KEY_PAGE
@@ -33,8 +34,11 @@ from players_db import (
     clear_all, reset_encounter_counts,
     display_name as player_display_name, format_stamp,
 )
-from launcher_config import load_config, save_config, add_recent_server, get_recent_servers
-from theme import THEME_QSS, HOPE_GOLD, ACCENT, ASH, BONE
+from launcher_config import (
+    load_config, save_config, add_recent_server, get_recent_servers,
+    get_pinned_servers, toggle_server_pin,
+)
+from theme import THEME_QSS, HOPE_GOLD, ACCENT, ASH, BONE, VOID_BLACK
 from version import __version__
 from update_checker import check_for_update
 from notifications import (
@@ -124,7 +128,7 @@ def is_server_unavailable(status: Optional[ServerStatus]) -> bool:
 
 class ServerTab(QWidget):
 
-    COLUMNS = ["Название", "Карта", "Игроки", "Пинг", "Статус", ""]
+    COLUMNS = ["", "Название", "Карта", "Игроки", "Пинг", "Статус", ""]
 
     result_ready = pyqtSignal(int, object)
     queue_connected = pyqtSignal(str, str)
@@ -140,6 +144,7 @@ class ServerTab(QWidget):
         self.executor = ThreadPoolExecutor(max_workers=8)
         self.result_ready.connect(self._apply_row)
         self.buttons: dict[int, QPushButton] = {}
+        self.pin_buttons: dict[int, QPushButton] = {}
         self.row_for_key: dict[tuple, int] = {}
         self.watching: set[tuple] = set()
         self.watch_timer = QTimer(self)
@@ -192,9 +197,9 @@ class ServerTab(QWidget):
 
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionsMovable(False)
-        for col, width in ((1, 130), (2, 90), (3, 90), (4, 130), (5, 165)):
+        for col, width in ((0, 40), (2, 130), (3, 90), (4, 90), (5, 130), (6, 165)):
             self.table.setColumnWidth(col, width)
         layout.addWidget(self.table)
 
@@ -208,35 +213,70 @@ class ServerTab(QWidget):
         self._build_rows()
         QTimer.singleShot(0, self.refresh)
 
+    def _ordered_defs(self):
+        """Сервера в порядке отображения: закреплённые сверху, остальные в исходном порядке."""
+        pinned = get_pinned_servers()
+        ordered = list(self.server_defs)
+        ordered.sort(key=lambda d: 0 if f"{d[0]}:{d[1]}" in pinned else 1)
+        return ordered
+
     def _build_rows(self):
         if self.hint_label is not None:
             self.hint_label.setVisible(len(self.server_defs) == 0)
-            
-        self.table.setRowCount(len(self.server_defs))
+
+        ordered = self._ordered_defs()
+        pinned = get_pinned_servers()
+
+        self.table.setRowCount(len(ordered))
         self.row_for_key = {}
         self.buttons = {}
-        
-        for row, (ip, port, name) in enumerate(self.server_defs):
+        self.pin_buttons = {}
+
+        for row, (ip, port, name) in enumerate(ordered):
             self.row_for_key[(ip, port)] = row
-            self.table.setItem(row, 0, QTableWidgetItem("Загрузка..."))
-            self.table.setItem(row, 1, QTableWidgetItem("—"))
+
+            is_pinned = f"{ip}:{port}" in pinned
+            pin_btn = QPushButton("★" if is_pinned else "☆")
+            pin_btn.setObjectName("PinButton")
+            pin_btn.setProperty("pinned", is_pinned)
+            pin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            pin_btn.setFixedSize(28, 28)
+            pin_btn.setToolTip("Открепить сервер" if is_pinned else "Закрепить сервер сверху")
+            pin_btn.clicked.connect(lambda _, ip=ip, port=port: self._toggle_pin(ip, port))
+            self.table.setCellWidget(row, 0, pin_btn)
+            self.pin_buttons[row] = pin_btn
+
+            self.table.setItem(row, 1, QTableWidgetItem("Загрузка..."))
             self.table.setItem(row, 2, QTableWidgetItem("—"))
             self.table.setItem(row, 3, QTableWidgetItem("—"))
-            self.table.setItem(row, 4, QTableWidgetItem("Опрос..."))
+            self.table.setItem(row, 4, QTableWidgetItem("—"))
+            self.table.setItem(row, 5, QTableWidgetItem("Опрос..."))
 
             btn = QPushButton("Подключиться")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFixedHeight(28)
             btn.clicked.connect(lambda _, ip=ip, port=port: self._handle_connect_click(ip, port))
-            self.table.setCellWidget(row, 5, btn)
+            self.table.setCellWidget(row, 6, btn)
             self.buttons[row] = btn
 
+        self._apply_filters()
+
+    def _toggle_pin(self, ip: str, port: int):
+        toggle_server_pin(ip, port)
+        self._rebuild_rows()
+
+    def _rebuild_rows(self):
+        self._build_rows()
+        for (ip, port), status in self.statuses.items():
+            row = self.row_for_key.get((ip, port))
+            if row is not None:
+                self._fill_row(row, status)
         self._apply_filters()
 
     def refresh(self):
         if self._closed:
             return
-        for row, (ip, port, name) in enumerate(self.server_defs):
+        for row, (ip, port, name) in enumerate(self._ordered_defs()):
             future = self.executor.submit(query_server, ip, port, name)
             future.add_done_callback(
                 lambda f, row=row, ip=ip, port=port: self._on_future_done(f, row, ip, port)
@@ -284,7 +324,7 @@ class ServerTab(QWidget):
     def _refresh_watched(self):
         if self._closed or not self.watching:
             return
-        for ip, port, name in self.server_defs:
+        for ip, port, name in self._ordered_defs():
             key = (ip, port)
             if key not in self.watching:
                 continue
@@ -351,40 +391,44 @@ class ServerTab(QWidget):
         self.watch_timer.stop()
         self.executor.shutdown(wait=False, cancel_futures=True)
 
-    def _apply_row(self, row: int, status: ServerStatus):
-        if row >= self.table.rowCount():
-            return
-
-        self.table.setItem(row, 0, QTableWidgetItem(status.display_name))
-        self.table.setItem(row, 1, QTableWidgetItem(status.map_name or "—"))
+    def _fill_row(self, row: int, status: ServerStatus):
+        self.table.setItem(row, 1, QTableWidgetItem(status.display_name))
+        self.table.setItem(row, 2, QTableWidgetItem(status.map_name or "—"))
 
         is_full = is_server_full(status)
-        key = (status.ip, status.port)
 
         players_item = QTableWidgetItem(status.players_str)
         if is_full:
             players_item.setForeground(QColor(ACCENT))
         elif status.online:
             players_item.setForeground(QColor(BONE))
-        self.table.setItem(row, 2, players_item)
+        self.table.setItem(row, 3, players_item)
 
         ping_str = f"{status.ping_ms} ms" if status.ping_ms else "—"
-        self.table.setItem(row, 3, QTableWidgetItem(ping_str))
+        self.table.setItem(row, 4, QTableWidgetItem(ping_str))
 
         state_item = QTableWidgetItem("● В сети" if status.online else "○ Не отвечает")
         state_item.setForeground(QColor(HOPE_GOLD if status.online else ASH))
         if not status.online and status.error:
             state_item.setToolTip(status.error)
-        self.table.setItem(row, 4, state_item)
+        self.table.setItem(row, 5, state_item)
 
-        if key in self.watching and status.online and not is_full:
+        self._update_button(row, status)
+
+    def _apply_row(self, row: int, status: ServerStatus):
+        key = (status.ip, status.port)
+        current_row = self.row_for_key.get(key)
+        if current_row is None:
+            return
+        self._fill_row(current_row, status)
+
+        if key in self.watching and status.online and not is_server_full(status):
             self.watching.discard(key)
             if not self.watching and self.watch_timer.isActive():
                 self.watch_timer.stop()
             connect_to_server(status.ip, status.port, status.display_name)
             self.queue_connected.emit(status.display_name, f"{status.ip}:{status.port}")
 
-        self._update_button(row, status)
         self._apply_filters()
 
     def _on_filter_toggled(self):
@@ -400,7 +444,7 @@ class ServerTab(QWidget):
         hide_offline = self.hide_offline_checkbox.isChecked()
         hide_full = self.hide_full_checkbox.isChecked()
 
-        for row, (ip, port, _name) in enumerate(self.server_defs):
+        for row, (ip, port, _name) in enumerate(self._ordered_defs()):
             key = (ip, port)
             status = self.statuses.get(key)
             if status is None:
@@ -583,7 +627,7 @@ class FriendsTab(QWidget):
 
     def _detect_lobby_joins(self, friends: list):
         lobby_names = {
-            (ip, port): name for ip, port, name in (*LOBBIES, *ENG_LOBBIES)
+            (ip, port): name for ip, port, name in (*LOBBIES, *EU_LOBBIES)
         }
 
         current: dict = {}
@@ -1391,19 +1435,327 @@ class PlayersTab(QWidget):
         self._closed = True
 
 
+def _parse_iso(value):
+    try:
+        return datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _format_game_date(game: dict) -> str:
+    dt = _parse_iso(game.get("created_at"))
+    return dt.strftime("%d.%m.%Y %H:%M") if dt else "—"
+
+
+def _format_game_duration(game: dict):
+    created = _parse_iso(game.get("created_at"))
+    updated = _parse_iso(game.get("updated_at"))
+    if not created or not updated or updated <= created:
+        return None
+    minutes = int((updated - created).total_seconds() // 60)
+    if minutes <= 0:
+        return None
+    if minutes < 60:
+        return f"{minutes} мин"
+    return f"{minutes // 60} ч {minutes % 60} мин"
+
+
+class GameCard(QFrame):
+
+    clicked = pyqtSignal(object)
+
+    def __init__(self, game: dict, notes_count: int, date_str: str, duration_str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("GameCard")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._game = game
+        self._build(game, notes_count, date_str, duration_str)
+
+    def _build(self, game, notes_count, date_str, duration_str):
+        box = QVBoxLayout(self)
+        box.setContentsMargins(14, 12, 14, 12)
+        box.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        title = QLabel(game.get("hostname", "Быстрая игра"))
+        title.setObjectName("GameCardTitle")
+        title.setWordWrap(True)
+        top.addWidget(title, 1)
+        date = QLabel(date_str)
+        date.setObjectName("GameCardDate")
+        top.addWidget(date, 0, Qt.AlignmentFlag.AlignTop)
+        box.addLayout(top)
+
+        meta_parts = [game.get("map_name") or "—", f"{len(game.get('players', []))} игроков"]
+        if duration_str:
+            meta_parts.append(duration_str)
+        if notes_count:
+            meta_parts.append(f"📝 {notes_count}")
+        meta = QLabel("   •   ".join(meta_parts))
+        meta.setObjectName("GameCardMeta")
+        box.addWidget(meta)
+
+        for w in self.findChildren(QWidget):
+            w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self._game)
+        super().mousePressEvent(event)
+
+
+def _game_date_key(game: dict) -> str:
+    dt = _parse_iso(game.get("created_at"))
+    return dt.strftime("%Y-%m-%d") if dt else ""
+
+
+def _pretty_date(date_str: str) -> str:
+    dt = _parse_iso(date_str)
+    return dt.strftime("%d.%m.%Y") if dt else date_str
+
+
+MONTH_NAMES = [
+    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+]
+DAY_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def _heat_color(count):
+    if count <= 0:
+        return QColor("#221C13")
+    if count == 1:
+        return QColor("#7A5D22")
+    if count == 2:
+        return QColor("#A87C2C")
+    if count == 3:
+        return QColor("#D19A38")
+    return QColor(ACCENT)
+
+
+class MonthGrid(QWidget):
+
+    day_clicked = pyqtSignal(str)
+
+    CELL = 18
+    GAP = 3
+    HEADER = 18
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._year = None
+        self._month = None
+        self._games_by_day = {}
+        self._selected_date = None
+        self.setMouseTracking(True)
+        self.setFixedSize(
+            7 * (self.CELL + self.GAP) - self.GAP,
+            self.HEADER + 6 * (self.CELL + self.GAP) - self.GAP,
+        )
+
+    def set_month(self, year, month, games_by_day):
+        self._year = year
+        self._month = month
+        self._games_by_day = games_by_day
+        self.update()
+
+    def clear_selection(self):
+        self._selected_date = None
+        self.update()
+
+    def _cell_rect(self, col, row):
+        x = col * (self.CELL + self.GAP)
+        y = self.HEADER + row * (self.CELL + self.GAP)
+        return QRectF(x, y, self.CELL, self.CELL)
+
+    def _day_for_pos(self, pos):
+        if self._year is None:
+            return None
+        y = pos.y() - self.HEADER
+        if y < 0:
+            return None
+        col = pos.x() // (self.CELL + self.GAP)
+        row = y // (self.CELL + self.GAP)
+        if col < 0 or col > 6 or row < 0 or row > 5:
+            return None
+        first_weekday = date(self._year, self._month, 1).weekday()
+        days_in_month = calendar.monthrange(self._year, self._month)[1]
+        day = row * 7 + col - first_weekday + 1
+        if day < 1 or day > days_in_month:
+            return None
+        return date(self._year, self._month, day)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self._year is not None:
+            font = painter.font()
+            font.setPointSize(8)
+            painter.setFont(font)
+
+            for i, name in enumerate(DAY_NAMES):
+                x = i * (self.CELL + self.GAP)
+                painter.setPen(QColor(ASH))
+                painter.drawText(
+                    QRectF(x, 0, self.CELL, self.HEADER),
+                    Qt.AlignmentFlag.AlignCenter,
+                    name,
+                )
+
+            first_weekday = date(self._year, self._month, 1).weekday()
+            days_in_month = calendar.monthrange(self._year, self._month)[1]
+            for day in range(1, days_in_month + 1):
+                idx = first_weekday + day - 1
+                col = idx % 7
+                row = idx // 7
+                iso = f"{self._year:04d}-{self._month:02d}-{day:02d}"
+                count = self._games_by_day.get(iso, 0)
+                rect = self._cell_rect(col, row)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(_heat_color(count))
+                painter.drawRoundedRect(rect, 3, 3)
+                painter.setPen(QColor(VOID_BLACK) if count > 0 else QColor(ASH))
+                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(day))
+                if self._selected_date is not None and self._selected_date == iso:
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.setPen(QPen(QColor(BONE), 1))
+                    painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 3, 3)
+        painter.end()
+
+    def mouseMoveEvent(self, event):
+        d = self._day_for_pos(event.position().toPoint())
+        if d is not None:
+            count = self._games_by_day.get(d.strftime("%Y-%m-%d"), 0)
+            self.setToolTip(f"{d.strftime('%d.%m.%Y')} — игр: {count}")
+            if count > 0:
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            else:
+                self.unsetCursor()
+        else:
+            self.setToolTip("")
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            d = self._day_for_pos(event.position().toPoint())
+            if d is not None:
+                count = self._games_by_day.get(d.strftime("%Y-%m-%d"), 0)
+                if count > 0:
+                    self._selected_date = d.strftime("%Y-%m-%d")
+                    self.update()
+                    self.day_clicked.emit(self._selected_date)
+        super().mousePressEvent(event)
+
+
+class GameCalendar(QWidget):
+
+    day_clicked = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._games_by_day = {}
+        self._current = None
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(4)
+
+        header = QHBoxLayout()
+        header.setSpacing(6)
+
+        self.prev_btn = QPushButton("◀")
+        self.prev_btn.setObjectName("CalNavButton")
+        self.prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.prev_btn.setFixedSize(24, 22)
+        self.prev_btn.clicked.connect(self._prev_month)
+        header.addWidget(self.prev_btn)
+
+        self.month_label = QLabel("")
+        self.month_label.setObjectName("CalendarMonthLabel")
+        self.month_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.month_label.setMinimumWidth(120)
+        header.addWidget(self.month_label)
+
+        self.next_btn = QPushButton("▶")
+        self.next_btn.setObjectName("CalNavButton")
+        self.next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.next_btn.setFixedSize(24, 22)
+        self.next_btn.clicked.connect(self._next_month)
+        header.addWidget(self.next_btn)
+        header.addStretch()
+
+        outer.addLayout(header)
+
+        self.grid = MonthGrid()
+        self.grid.day_clicked.connect(self.day_clicked)
+        outer.addWidget(self.grid)
+
+    def set_games(self, games):
+        self._games_by_day = {}
+        for g in games:
+            dt = _parse_iso(g.get("created_at"))
+            if dt:
+                key = dt.strftime("%Y-%m-%d")
+                self._games_by_day[key] = self._games_by_day.get(key, 0) + 1
+        if self._current is None:
+            if self._games_by_day:
+                latest = max(date.fromisoformat(k) for k in self._games_by_day)
+                self._current = date(latest.year, latest.month, 1)
+            else:
+                self._current = date.today().replace(day=1)
+        self._update_view()
+
+    def clear_selection(self):
+        self.grid.clear_selection()
+
+    def _update_view(self):
+        self.month_label.setText(f"{MONTH_NAMES[self._current.month - 1]} {self._current.year}")
+        self.grid.set_month(self._current.year, self._current.month, self._games_by_day)
+
+    def _prev_month(self):
+        y, m = self._current.year, self._current.month
+        if m == 1:
+            y, m = y - 1, 12
+        else:
+            m -= 1
+        self._current = date(y, m, 1)
+        self._update_view()
+
+    def _next_month(self):
+        y, m = self._current.year, self._current.month
+        if m == 12:
+            y, m = y + 1, 1
+        else:
+            m += 1
+        self._current = date(y, m, 1)
+        self._update_view()
+
+
 class FastGamesTab(QWidget):
+
+    avatar_loaded = pyqtSignal(str, object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._closed = False
         self._games = []
-        
+        self._player_sids = []
+        self._player_row_by_id = {}
+        self._avatar_cache = {}
+        self._comments = {}
+        self._filter_date = None
+        self.executor = ThreadPoolExecutor(max_workers=6)
+        self.avatar_loaded.connect(self._on_avatar_loaded)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        
         self.stacked = QStackedWidget()
         layout.addWidget(self.stacked)
 
-        # --- Страница 1: Список игр ---
+        # --- Страница 1: список игр ---
         self.list_page = QWidget()
         list_layout = QVBoxLayout(self.list_page)
         list_layout.setContentsMargins(14, 12, 14, 14)
@@ -1429,25 +1781,67 @@ class FastGamesTab(QWidget):
         top_row.addWidget(refresh_btn)
         list_layout.addLayout(top_row)
 
-        self.games_table = QTableWidget(0, 4)
-        self.games_table.setHorizontalHeaderLabels(["Дата", "Название сервера", "Карта", "Игроки"])
-        self.games_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.games_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.games_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.games_table.verticalHeader().setVisible(False)
-        self.games_table.setAlternatingRowColors(True)
-        self.games_table.setShowGrid(False)
-        self.games_table.verticalHeader().setDefaultSectionSize(38)
-        gh = self.games_table.horizontalHeader()
-        gh.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        gh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        gh.setSectionsMovable(False)
-        self.games_table.setColumnWidth(0, 140)
-        self.games_table.setColumnWidth(2, 130)
-        self.games_table.setColumnWidth(3, 80)
-        self.games_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.games_table.cellClicked.connect(self._on_game_clicked)
-        list_layout.addWidget(self.games_table, 1)
+        # --- основное содержимое: слева календарь, справа список игр ---
+        self.content_widget = QWidget()
+        content = QHBoxLayout(self.content_widget)
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(12)
+
+        # Левая колонка: счётчик + календарь
+        self.dashboard = QFrame()
+        self.dashboard.setObjectName("DashboardCard")
+        dash = QVBoxLayout(self.dashboard)
+        dash.setContentsMargins(16, 14, 16, 14)
+        dash.setSpacing(8)
+
+        self.games_count_value = QLabel("0")
+        self.games_count_value.setObjectName("DashboardValue")
+        dash.addWidget(self.games_count_value)
+        games_label = QLabel("ИГР")
+        games_label.setObjectName("DashboardLabel")
+        dash.addWidget(games_label)
+
+        self.calendar = GameCalendar()
+        self.calendar.day_clicked.connect(self._on_day_clicked)
+        dash.addWidget(self.calendar)
+
+        content.addWidget(self.dashboard, 0, Qt.AlignmentFlag.AlignTop)
+
+        # Правая колонка: фильтр + список игр
+        right_col = QVBoxLayout()
+        right_col.setSpacing(8)
+
+        self.filter_bar = QWidget()
+        filter_layout = QHBoxLayout(self.filter_bar)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(8)
+        self.filter_label = QLabel("")
+        self.filter_label.setObjectName("HintLabel")
+        filter_layout.addWidget(self.filter_label)
+        filter_layout.addStretch()
+        self.filter_reset_btn = QPushButton("✕  Сбросить фильтр")
+        self.filter_reset_btn.setObjectName("RefreshButton")
+        self.filter_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.filter_reset_btn.clicked.connect(self._clear_filter)
+        filter_layout.addWidget(self.filter_reset_btn)
+        self.filter_bar.setVisible(False)
+        right_col.addWidget(self.filter_bar)
+
+        self.cards_scroll = QScrollArea()
+        self.cards_scroll.setWidgetResizable(True)
+        self.cards_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.cards_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.cards_container = QWidget()
+        self.cards_layout = QVBoxLayout(self.cards_container)
+        self.cards_layout.setContentsMargins(0, 0, 6, 0)
+        self.cards_layout.setSpacing(8)
+        self.cards_layout.addStretch()
+        self.cards_scroll.setWidget(self.cards_container)
+        right_col.addWidget(self.cards_scroll, 1)
+
+        content.addLayout(right_col, 1)
+
+        list_layout.addWidget(self.content_widget, 1)
 
         self.empty_label = QLabel(
             "Пока пусто. Зайди на сервер и напиши 'status' в консоли. "
@@ -1460,7 +1854,7 @@ class FastGamesTab(QWidget):
 
         self.stacked.addWidget(self.list_page)
 
-        # --- Страница 2: Детали игры ---
+        # --- Страница 2: детали игры ---
         self.detail_page = QWidget()
         detail_layout = QVBoxLayout(self.detail_page)
         detail_layout.setContentsMargins(14, 12, 14, 14)
@@ -1475,28 +1869,37 @@ class FastGamesTab(QWidget):
         back_row.addStretch()
         detail_layout.addLayout(back_row)
 
+        self.header_card = QFrame()
+        self.header_card.setObjectName("ProfileCard")
+        header_box = QVBoxLayout(self.header_card)
+        header_box.setContentsMargins(16, 12, 16, 12)
+        header_box.setSpacing(4)
         self.game_title = QLabel("")
         self.game_title.setObjectName("ProfileName")
-        detail_layout.addWidget(self.game_title)
-
+        self.game_title.setWordWrap(True)
+        header_box.addWidget(self.game_title)
         self.game_meta = QLabel("")
         self.game_meta.setObjectName("ProfileSubtitle")
-        detail_layout.addWidget(self.game_meta)
+        self.game_meta.setWordWrap(True)
+        header_box.addWidget(self.game_meta)
+        detail_layout.addWidget(self.header_card)
 
-        self.players_table = DeselectableTable(0, 2)
-        self.players_table.setHorizontalHeaderLabels(["Ник", "SteamID"])
+        self.players_table = DeselectableTable(0, 6)
+        self.players_table.setHorizontalHeaderLabels(["", "Ник", "📝", "Встреч", "SteamID", ""])
         self.players_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.players_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.players_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.players_table.verticalHeader().setVisible(False)
         self.players_table.setAlternatingRowColors(True)
         self.players_table.setShowGrid(False)
-        self.players_table.verticalHeader().setDefaultSectionSize(34)
+        self.players_table.verticalHeader().setDefaultSectionSize(40)
+        self.players_table.setIconSize(QSize(32, 32))
         ph = self.players_table.horizontalHeader()
         ph.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        ph.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        ph.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         ph.setSectionsMovable(False)
-        self.players_table.setColumnWidth(1, 155)
+        for col, width in ((0, 44), (2, 36), (3, 70), (4, 170), (5, 120)):
+            self.players_table.setColumnWidth(col, width)
         self.players_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.players_table.cellClicked.connect(self._on_player_clicked)
         detail_layout.addWidget(self.players_table, 1)
@@ -1508,7 +1911,7 @@ class FastGamesTab(QWidget):
         self.stacked.addWidget(self.detail_page)
 
         self.reload_list()
-        
+
         # Автоматически парсим старую базу при первом открытии, если история пуста
         if not self._games:
             self._on_migrate_clicked()
@@ -1522,60 +1925,198 @@ class FastGamesTab(QWidget):
     def on_status_snapshot(self, snapshot):
         if self._closed:
             return
-        # Функция add_fast_game сама проверит, быстрая это игра или нет, 
-        # и не создаст дубликат, если игра та же.
         if add_fast_game(snapshot):
             self.reload_list()
+
+    def _build_player_maps(self):
+        comments = get_comments_map()
+        encounters = {}
+        names = {}
+        for p in get_all_players():
+            sid = p.get("steam_id64")
+            if sid:
+                encounters[sid] = p.get("encounters", 0)
+                if p.get("names"):
+                    names[sid] = p["names"][0]
+        return comments, encounters, names
 
     def reload_list(self):
         if self._closed:
             return
         self._games = get_fast_games()
-        self.games_table.setRowCount(len(self._games))
-        
-        self.empty_label.setVisible(len(self._games) == 0)
+        self._comments, _encounters, _names = self._build_player_maps()
 
-        for row, game in enumerate(self._games):
-            date_str = game.get("created_at", "").replace("T", " ")[:16]
-            self.games_table.setItem(row, 0, QTableWidgetItem(date_str))
-            # Показываем именно текстовое имя (hostname), а не IP
-            self.games_table.setItem(row, 1, QTableWidgetItem(game.get("hostname", "—")))
-            self.games_table.setItem(row, 2, QTableWidgetItem(game.get("map_name", "—")))
-            self.games_table.setItem(row, 3, QTableWidgetItem(str(len(game.get("players", [])))))
+        self._update_dashboard()
+        self._render_cards()
 
-    def _on_game_clicked(self, row: int, _column: int):
-        if 0 <= row < len(self._games):
-            game = self._games[row]
-            self.detail_panel.close_panel() # Закрываем панель при смене игры
-            
-            date_str = game.get("created_at", "").replace("T", " ")[:16]
-            # В заголовке выводим название, а в мета-данных - дату
-            self.game_title.setText(game.get("hostname", "Быстрая игра"))
-            self.game_meta.setText(
-                f"Дата регистрации: {date_str}   •   Карта: {game.get('map_name', '—')}"
-            )
+        has_games = len(self._games) > 0
+        self.content_widget.setVisible(has_games)
+        self.empty_label.setVisible(not has_games)
+        self.filter_bar.setVisible(has_games and bool(self._filter_date))
 
+    def _update_dashboard(self):
+        self.games_count_value.setText(str(len(self._games)))
+        self.calendar.set_games(self._games)
+
+    def _games_for_display(self):
+        if not self._filter_date:
+            return self._games
+        return [g for g in self._games if _game_date_key(g) == self._filter_date]
+
+    def _on_day_clicked(self, date_str):
+        self._filter_date = date_str
+        self._render_cards()
+        shown = len(self._games_for_display())
+        self.filter_label.setText(f"Показаны игры за {_pretty_date(date_str)} — {shown}")
+        self.filter_bar.setVisible(True)
+
+    def _clear_filter(self):
+        self._filter_date = None
+        self.calendar.clear_selection()
+        self.filter_bar.setVisible(False)
+        self._render_cards()
+
+    def _render_cards(self):
+        while self.cards_layout.count() > 1:
+            item = self.cards_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        for game in self._games_for_display():
             players = game.get("players", [])
-            self.players_table.setRowCount(len(players))
-            for prow, player in enumerate(players):
-                name_item = QTableWidgetItem(player.get("name", "—"))
-                # Сохраняем steam_id64 в скрытые данные ячейки для открытия профиля
-                name_item.setData(Qt.ItemDataRole.UserRole, player.get("steam_id64", ""))
-                self.players_table.setItem(prow, 0, name_item)
-                
-                self.players_table.setItem(prow, 1, QTableWidgetItem(player.get("steam_id", "—")))
+            notes_count = sum(1 for p in players if self._comments.get(p.get("steam_id64")))
+            card = GameCard(
+                game,
+                notes_count,
+                _format_game_date(game),
+                _format_game_duration(game),
+            )
+            card.clicked.connect(self._on_game_clicked)
+            self.cards_layout.insertWidget(self.cards_layout.count() - 1, card)
 
-            self.stacked.setCurrentIndex(1)
+    def _on_game_clicked(self, game: dict):
+        if self._closed:
+            return
+        self.detail_panel.close_panel()
+        self._player_sids = []
+        self._player_row_by_id = {}
+
+        comments, encounters, _names = self._build_player_maps()
+        players = game.get("players", [])
+
+        self.game_title.setText(game.get("hostname", "Быстрая игра"))
+        notes_count = sum(1 for p in players if comments.get(p.get("steam_id64")))
+        duration = _format_game_duration(game)
+        meta_parts = [
+            f"Дата: {_format_game_date(game)}",
+            f"Карта: {game.get('map_name', '—')}",
+            f"Игроков: {len(players)}",
+        ]
+        if duration:
+            meta_parts.append(f"Длительность: {duration}")
+        if notes_count:
+            meta_parts.append(f"📝 с заметками: {notes_count}")
+        self.game_meta.setText("   •   ".join(meta_parts))
+
+        self.players_table.setRowCount(len(players))
+        ids = []
+        for row, player in enumerate(players):
+            sid = player.get("steam_id64", "")
+            self._player_sids.append(sid)
+            self._player_row_by_id[sid] = row
+
+            avatar_item = QTableWidgetItem()
+            self.players_table.setItem(row, 0, avatar_item)
+
+            name_item = QTableWidgetItem(player.get("name", "—"))
+            comment = comments.get(sid)
+            if comment:
+                name_item.setForeground(QColor(HOPE_GOLD))
+                name_item.setToolTip(comment)
+            self.players_table.setItem(row, 1, name_item)
+
+            note_item = QTableWidgetItem("📝" if comment else "")
+            note_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if comment:
+                note_item.setToolTip(comment)
+            self.players_table.setItem(row, 2, note_item)
+
+            enc = encounters.get(sid, 0)
+            self.players_table.setItem(row, 3, QTableWidgetItem(str(enc) if enc else "—"))
+
+            self.players_table.setItem(row, 4, QTableWidgetItem(player.get("steam_id", "—")))
+
+            profile_btn = QPushButton("Профиль")
+            profile_btn.setObjectName("RefreshButton")
+            profile_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            profile_btn.setFixedHeight(28)
+            profile_btn.setEnabled(bool(sid))
+            if sid:
+                url = f"https://steamcommunity.com/profiles/{sid}"
+                profile_btn.clicked.connect(lambda _, u=url: webbrowser.open(u))
+            self.players_table.setCellWidget(row, 5, profile_btn)
+
+            if sid:
+                ids.append(sid)
+
+        self.stacked.setCurrentIndex(1)
+        if ids:
+            self._load_avatars(ids)
 
     def _on_player_clicked(self, row: int, _column: int):
+        if 0 <= row < len(self._player_sids):
+            sid = self._player_sids[row]
+            if sid:
+                self.detail_panel.show_player(sid)
+
+    def _load_avatars(self, ids):
+        api_key = load_config().get("steam_api_key", "").strip()
+        if not api_key:
+            return
+        self.executor.submit(self._avatar_worker, api_key, ids)
+
+    def _avatar_worker(self, api_key, ids):
+        try:
+            summaries = fetch_summaries_map(api_key, ids)
+        except Exception:
+            return
+        for steam_id, info in summaries.items():
+            url = info.get("avatar", "")
+            if not url:
+                continue
+            if url in self._avatar_cache:
+                self.avatar_loaded.emit(steam_id, self._avatar_cache[url])
+            else:
+                self.executor.submit(self._load_avatar_bytes, steam_id, url)
+
+    def _load_avatar_bytes(self, steam_id, url):
+        data = fetch_avatar(url)
+        if data:
+            self._avatar_cache[url] = data
+            self.avatar_loaded.emit(steam_id, data)
+
+    def _on_avatar_loaded(self, steam_id: str, data):
+        if self._closed:
+            return
+        row = self._player_row_by_id.get(steam_id)
+        if row is None:
+            return
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(data):
+            return
         item = self.players_table.item(row, 0)
-        if item:
-            steam_id64 = item.data(Qt.ItemDataRole.UserRole)
-            if steam_id64:
-                self.detail_panel.show_player(steam_id64)
+        if item is None:
+            return
+        item.setIcon(QIcon(pixmap.scaled(
+            32, 32,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )))
 
     def shutdown(self):
         self._closed = True
+        self.executor.shutdown(wait=False, cancel_futures=True)
 
 
 class ConsoleTab(QWidget):
@@ -2292,25 +2833,33 @@ class LauncherWindow(QMainWindow):
         tabs.setUsesScrollButtons(False)
         tabs.tabBar().setExpanding(True)
 
-        self.lobbies_tab = ServerTab(
+        # Вкладка «Лобби» с подкатегориями RU / EU
+        lobby_tabs = QTabWidget()
+        lobby_tabs.setUsesScrollButtons(False)
+        lobby_tabs.tabBar().setExpanding(True)
+
+        self.ru_lobbies_tab = ServerTab(
             LOBBIES,
             empty_hint=(
-                "Список лобби пуст. Впиши реальные сервера в servers.py "
+                "Список RU лобби пуст. Впиши реальные сервера в servers.py "
                 "(список LOBBIES) — формат: (ip, port, название)."
             ),
         )
-        self.lobbies_tab.queue_connected.connect(self._on_queue_connected)
-        tabs.addTab(self.lobbies_tab, "Лобби")
+        self.ru_lobbies_tab.queue_connected.connect(self._on_queue_connected)
+        lobby_tabs.addTab(self.ru_lobbies_tab, "RU")
 
-        self.eng_lobbies_tab = ServerTab(
-            ENG_LOBBIES,
+        self.eu_lobbies_tab = ServerTab(
+            EU_LOBBIES,
             empty_hint=(
-                "Список ENG лобби пуст. Впиши реальные сервера в servers.py "
-                "(список ENG_LOBBIES) — формат: (ip, port, название)."
+                "Список EU лобби пуст. Впиши реальные сервера в servers.py "
+                "(список EU_LOBBIES) — формат: (ip, port, название)."
             ),
         )
-        self.eng_lobbies_tab.queue_connected.connect(self._on_queue_connected)
-        tabs.addTab(self.eng_lobbies_tab, "ENG Lobby")
+        self.eu_lobbies_tab.queue_connected.connect(self._on_queue_connected)
+        lobby_tabs.addTab(self.eu_lobbies_tab, "EU")
+
+        self._server_tabs = [self.ru_lobbies_tab, self.eu_lobbies_tab]
+        tabs.addTab(lobby_tabs, "Лобби")
 
         self.recent_tab = RecentServersTab()
         connection_events.connected.connect(self.recent_tab.on_launcher_connected)
@@ -2347,7 +2896,7 @@ class LauncherWindow(QMainWindow):
 
 
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.lobbies_tab.refresh)
+        self.timer.timeout.connect(self._refresh_server_tabs)
         self.timer.start(REFRESH_INTERVAL_MS)
 
         self._init_tray_icon()
@@ -2410,6 +2959,10 @@ class LauncherWindow(QMainWindow):
         self.status_tab.apply_snapshot(snapshot)
         self.players_tab.reload()
 
+    def _refresh_server_tabs(self):
+        for tab in self._server_tabs:
+            tab.refresh()
+
     def _init_tray_icon(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             self.tray_icon = None
@@ -2466,7 +3019,8 @@ class LauncherWindow(QMainWindow):
     def _quit_app(self):
         if self.tray_icon is not None:
             self.tray_icon.hide()
-        self.lobbies_tab.shutdown()
+        for tab in self._server_tabs:
+            tab.shutdown()
         self.recent_tab.shutdown()
         self.friends_tab.shutdown()
         self.profile_tab.shutdown()
@@ -2492,7 +3046,8 @@ class LauncherWindow(QMainWindow):
         else:
             if self.tray_icon is not None:
                 self.tray_icon.hide()
-            self.lobbies_tab.shutdown()
+            for tab in self._server_tabs:
+                tab.shutdown()
             self.recent_tab.shutdown()
             self.friends_tab.shutdown()
             self.profile_tab.shutdown()

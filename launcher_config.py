@@ -42,3 +42,28 @@ def add_recent_server(ip: str, port: int, name: str, limit: int = 10) -> None:
 
 def get_recent_servers() -> list:
     return load_config().get("recent_servers", [])
+
+
+def get_pinned_servers() -> set:
+    """Множество адресов закреплённых серверов в формате 'ip:port'."""
+    return set(load_config().get("pinned_servers", []))
+
+
+def is_server_pinned(ip: str, port: int) -> bool:
+    return f"{ip}:{port}" in get_pinned_servers()
+
+
+def toggle_server_pin(ip: str, port: int) -> bool:
+    """Переключает закрепление сервера. Возвращает новое состояние (True = закреплён)."""
+    config = load_config()
+    pinned = set(config.get("pinned_servers", []))
+    address = f"{ip}:{port}"
+    if address in pinned:
+        pinned.discard(address)
+        new_state = False
+    else:
+        pinned.add(address)
+        new_state = True
+    config["pinned_servers"] = sorted(pinned)
+    save_config(config)
+    return new_state

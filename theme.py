@@ -272,6 +272,23 @@ QPushButton#RefreshButton:hover {{
     background-color: transparent;
 }}
 
+/* Кнопка закрепления сервера (звёздочка) */
+QPushButton#PinButton {{
+    background-color: transparent;
+    color: #5A5344;
+    border: none;
+    font-size: 15px;
+    padding: 0;
+    min-height: 20px;
+}}
+QPushButton#PinButton:hover {{
+    color: {HOPE_GOLD};
+    background-color: transparent;
+}}
+QPushButton#PinButton[pinned="true"] {{
+    color: {ACCENT};
+}}
+
 /* Кнопка на переполненном сервере — предлагает встать в очередь */
 QPushButton#FullButton {{
     background-color: {PANEL};
@@ -416,6 +433,62 @@ QLabel#ProfileValue {{
 QLabel#ProfileValue:selected {{
     background-color: {ACCENT};
     color: {VOID_BLACK};
+}}
+
+/* ---------- История игр: карточки и дашборд ---------- */
+QFrame#GameCard {{
+    background-color: {PANEL};
+    border: 1px solid {PANEL_EDGE};
+    border-left: 3px solid {ACCENT};
+}}
+QFrame#GameCard:hover {{
+    background-color: #201B14;
+    border-color: {ACCENT};
+}}
+QLabel#GameCardTitle {{
+    color: {BONE};
+    font-size: 15px;
+    font-weight: 700;
+}}
+QLabel#GameCardDate {{
+    color: {ASH};
+    font-size: 11px;
+}}
+QLabel#GameCardMeta {{
+    color: {ASH};
+    font-size: 12px;
+}}
+QFrame#DashboardCard {{
+    background-color: {PANEL};
+    border: 1px solid {PANEL_EDGE};
+}}
+QLabel#DashboardValue {{
+    color: {HOPE_GOLD};
+    font-size: 20px;
+    font-weight: 700;
+}}
+QLabel#DashboardLabel {{
+    color: {ASH};
+    font-size: 10px;
+    letter-spacing: 1px;
+}}
+QPushButton#CalNavButton {{
+    background-color: transparent;
+    color: {ASH};
+    border: 1px solid {PANEL_EDGE};
+    border-radius: 2px;
+    font-size: 12px;
+    padding: 0;
+}}
+QPushButton#CalNavButton:hover {{
+    color: {BONE};
+    border-color: {ACCENT};
+    background-color: transparent;
+}}
+QLabel#CalendarMonthLabel {{
+    color: {BONE};
+    font-size: 13px;
+    font-weight: 700;
 }}
 
 /* ---------- Вывод игровой консоли ---------- */
