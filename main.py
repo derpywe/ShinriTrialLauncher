@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QTabWidget, QTableWidget, QTableWidgetItem, QPushButton, QLabel,
     QHeaderView, QAbstractItemView, QFrame, QScrollArea, QComboBox, QDialog,
     QCheckBox, QSystemTrayIcon, QMenu, QLineEdit, QPlainTextEdit, QFileDialog,
-    QGridLayout, QMessageBox, QStackedWidget, QProgressDialog
+    QGridLayout, QMessageBox, QStackedWidget
 )
 
 from servers import LOBBIES, EU_LOBBIES
@@ -40,9 +40,7 @@ from launcher_config import (
 )
 from theme import THEME_QSS, HOPE_GOLD, ACCENT, ASH, BONE, VOID_BLACK
 from version import __version__
-from update_checker import (
-    check_for_update, download_update, install_update, get_update_download_path,
-)
+from update_checker import check_for_update
 from notifications import (
     fetch_notifications, has_unread, mark_all_read,
 )
@@ -2403,25 +2401,13 @@ class ConsoleTab(QWidget):
 
 class NotificationsPopup(QDialog):
 
-    download_progress = pyqtSignal(int, int)
-    download_finished = pyqtSignal(str)
-    download_failed = pyqtSignal(str)
-
     def __init__(self, notifications, anchor_widget, parent_window):
         super().__init__(parent_window)
-        self._parent_window = parent_window
-        self._download_executor = ThreadPoolExecutor(max_workers=1)
-        self._progress = None
-
         self.setWindowFlags(
             Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
         )
         self.setObjectName("NotificationsPopup")
         self.setFixedWidth(420)
-
-        self.download_progress.connect(self._on_download_progress)
-        self.download_finished.connect(self._on_download_finished)
-        self.download_failed.connect(self._on_download_failed)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(2, 2, 2, 2)
@@ -2495,82 +2481,20 @@ class NotificationsPopup(QDialog):
             box.addWidget(body_lbl)
 
         if item.get("is_update"):
-            btn = QPushButton("Обновить")
+            btn = QPushButton("Скачать обновление")
             btn.setObjectName("MenuButtonPrimary")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFixedHeight(30)
-            btn.clicked.connect(
-                lambda _, d=item.get("download_url"), r=item.get("release_url"),
-                s=item.get("download_sha256"): self._on_update_clicked(d, r, s)
-            )
+            # Просто открываем страницу релиза в браузере
+            btn.clicked.connect(lambda _, url=item.get("release_url"): self._on_download_clicked(url))
             box.addWidget(btn)
 
         return frame
 
-    def _on_update_clicked(self, download_url, release_url, sha256=""):
-        if not download_url:
-            if release_url:
-                webbrowser.open(release_url)
-            self.accept()
-            return
-
-        self._progress = QProgressDialog(
-            "Скачиваю обновление...", "", 0, 0, self._parent_window
-        )
-        self._progress.setWindowTitle("Обновление")
-        self._progress.setWindowModality(Qt.WindowModality.WindowModal)
-        self._progress.setMinimumDuration(0)
-        self._progress.setAutoClose(False)
-        self._progress.setAutoReset(False)
-        self._progress.show()
-
-        dest = get_update_download_path()
-        self._download_executor.submit(self._download_worker, download_url, dest, sha256)
-
-    def _download_worker(self, url, dest, sha256):
-        try:
-            def cb(done, total):
-                self.download_progress.emit(done, total)
-
-            download_update(url, dest, progress_cb=cb, expected_sha256=sha256)
-            self.download_finished.emit(dest)
-        except Exception as exc:
-            self.download_failed.emit(str(exc))
-
-    def _on_download_progress(self, done, total):
-        if self._progress is None:
-            return
-        if total > 0:
-            if self._progress.maximum() == 0:
-                self._progress.setRange(0, 100)
-            self._progress.setValue(int(done * 100 / total))
-
-    def _on_download_finished(self, dest):
-        self._close_progress()
-        ok = install_update(dest)
-        if ok:
-            self.accept()
-            self._download_executor.shutdown(wait=False, cancel_futures=True)
-            if self._parent_window is not None:
-                self._parent_window._quit_app()
-        else:
-            QMessageBox.warning(
-                self,
-                "Обновление",
-                "Не удалось применить обновление автоматически.\n"
-                "Скачай и замени файл лаунчера вручную.",
-            )
-
-    def _on_download_failed(self, error):
-        self._close_progress()
-        QMessageBox.warning(
-            self, "Обновление", f"Не удалось скачать обновление: {error}"
-        )
-
-    def _close_progress(self):
-        if self._progress is not None:
-            self._progress.close()
-            self._progress = None
+    def _on_download_clicked(self, url):
+        if url:
+            webbrowser.open(url)
+        self.accept()
 
     def _fit_height(self, count: int):
         if count == 0:
@@ -3010,7 +2934,6 @@ class LauncherWindow(QMainWindow):
                     "is_update": True,
                     "release_url": update_info.get("url", ""),
                     "download_url": update_info.get("download_url", ""),
-                    "download_sha256": update_info.get("download_sha256", ""),
                 })
         except Exception:
             pass
